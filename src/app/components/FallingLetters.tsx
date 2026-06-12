@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { LANGUAGE_OPTIONS, resolveLanguage } from "./quotes";
 
@@ -31,6 +31,7 @@ interface Particle {
   landed: boolean;
   startTime: number;
   isSpace: boolean;
+  target?: { x: number; y: number };
 }
 
 interface DragState {
@@ -70,7 +71,6 @@ interface FallingLettersProps {
 }
 
 export function FallingLetters({ quote, language, onComplete, onClose }: FallingLettersProps) {
-  // Lazy-initialize particles once (synchronous, before first render)
   const particlesRef = useRef<Particle[] | null>(null);
   if (particlesRef.current === null) {
     particlesRef.current = initParticles(quote);
@@ -86,35 +86,154 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const dragRef = useRef<DragState | null>(null);
   const frameCountRef = useRef(0);
   const cameraReadyRef = useRef(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const lastClapRef = useRef<number>(0);
+  const quoteSortedRef = useRef(false);
 
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState(false);
-  const [cameraRequested, setCameraRequested] = useState(false);
+  const [clapDetected, setClapDetected] = useState(false);
+  const [quoteSorted, setQuoteSorted] = useState(false);
 
-  // Physics + motion detection loop
+  const triggerSort = useCallback(() => {
+    setClapDetected(true);
+    setTimeout(() => setClapDetected(false), 600);
+
+    const words = quote.split(" ");
+    const centerY = window.innerHeight * 0.5;
+    const totalWidth = words.length * 80;
+    const startX = (window.innerWidth - totalWidth) / 2;
+
+    let charIdx = 0;
+    const targets: { x: number; y: number }[] = [];
+
+    for (let w = 0; w < words.length; w++) {
+      const word = words[w];
+      const wordX = startX + w * 85;
+      for (let c = 0; c < word.length; c++) {
+        targets[charIdx] = { x: wordX + c * 22, y: centerY };
+        charIdx++;
+      }
+      if (w < words.length - 1) {
+        targets[charIdx] = { x: wordX + word.length * 22 + 10, y: centerY };
+        charIdx++;
+      }
+    }
+
+    for (let i = 0; i < particles.length; i++) {
+      if (!targets[i]) continue;
+      particles[i].vx = (targets[i].x - particles[i].x) * 0.15;
+      particles[i].vy = (targets[i].y - particles[i].y) * 0.15;
+      particles[i].landed = false;
+      particles[i].target = targets[i];
+    }
+
+    setTimeout(() => {
+      for (let i = 0; i < particles.length; i++) {
+        if (!targets[i]) continue;
+        particles[i].x = targets[i].x;
+        particles[i].y = targets[i].y;
+        particles[i].vx = 0;
+        particles[i].vy = 0;
+        particles[i].landed = true;
+      }
+      quoteSortedRef.current = true;
+      setQuoteSorted(true);
+    }, 1500);
+  }, [quote, particles]);
+
+  // Auto-start camera and microphone on mount
+  useEffect(() => {
+    let mounted = true;
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError(true);
+      return;
+    }
+
+    navigator.mediaDevices
+      .getUserMedia({ video: { width: 160, height: 120, facingMode: "user" } })
+      .then(stream => {
+        if (!mounted) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().then(() => {
+            cameraReadyRef.current = true;
+            setCameraActive(true);
+          });
+        }
+      })
+      .catch(() => {
+        if (mounted) setCameraError(true);
+      });
+
+    navigator.mediaDevices
+      .getUserMedia({ audio: true, video: false })
+      .then(stream => {
+        if (!mounted) { stream.getTracks().forEach(t => t.stop()); return; }
+        micStreamRef.current = stream;
+        const audioCtx = new AudioContext();
+        audioCtxRef.current = audioCtx;
+        const analyser = audioCtx.createAnalyser();
+        analyserRef.current = analyser;
+        analyser.fftSize = 256;
+        const source = audioCtx.createMediaStreamSource(stream);
+        source.connect(analyser);
+      })
+      .catch(() => {
+        // mic not available — clap detection disabled, button fallback only
+      });
+
+    return () => {
+      mounted = false;
+      cameraReadyRef.current = false;
+      streamRef.current?.getTracks().forEach(t => t.stop());
+      micStreamRef.current?.getTracks().forEach(t => t.stop());
+      audioCtxRef.current?.close();
+    };
+  }, []);
+
+  // Physics + motion detection + clap detection loop
   useEffect(() => {
     const FLOOR = window.innerHeight - 110;
+    const GRID_W = 40;
+    const GRID_H = 30;
+
+    const checkClap = () => {
+      const analyser = analyserRef.current;
+      if (!analyser) return;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(data);
+      const avg = data.reduce((a, b) => a + b, 0) / data.length;
+      const now = performance.now();
+      if (avg > 60 && now - lastClapRef.current > 800) {
+        lastClapRef.current = now;
+        triggerSort();
+      }
+    };
 
     const detectMotion = () => {
       if (!cameraReadyRef.current || !videoRef.current || !motionCanvasRef.current) return;
       const ctx = motionCanvasRef.current.getContext("2d");
       if (!ctx) return;
 
-      const W = 40, H = 30;
+      const W = GRID_W, H = GRID_H;
       motionCanvasRef.current.width = W;
       motionCanvasRef.current.height = H;
 
-      try {
-        ctx.drawImage(videoRef.current, 0, 0, W, H);
-      } catch { return; }
+      try { ctx.drawImage(videoRef.current, 0, 0, W, H); } catch { return; }
 
       let current: Uint8ClampedArray;
-      try {
-        current = ctx.getImageData(0, 0, W, H).data;
-      } catch { return; }
+      try { current = ctx.getImageData(0, 0, W, H).data; } catch { return; }
 
       if (prevFrameRef.current) {
         const prev = prevFrameRef.current;
+        let totalMotionPixels = 0;
+        const motionPoints: { gx: number; strength: number }[] = [];
+
         for (let py = 0; py < H; py += 2) {
           for (let px = 0; px < W; px += 2) {
             const idx = (py * W + px) * 4;
@@ -124,22 +243,43 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
               Math.abs(current[idx+2] - prev[idx+2]);
 
             if (diff > 40) {
+              totalMotionPixels++;
+              motionPoints.push({ gx: px, strength: diff / 255 });
+
               // Camera feed is mirrored — flip x
-              const screenX = (1 - px / W) * window.innerWidth;
-              const screenY = (py / H) * window.innerHeight;
+              const sx = (1 - px / W) * window.innerWidth;
+              const sy = (py / H) * window.innerHeight;
 
               for (const p of particles) {
                 if (p.isSpace) continue;
-                const dx = p.x - screenX;
-                const dy = p.y - screenY;
+                const dx = p.x - sx;
+                const dy = p.y - sy;
                 const dist = Math.sqrt(dx * dx + dy * dy);
-                if (dist < 100 && dist > 1) {
-                  p.vx += (dx / dist) * 4;
-                  p.vy += (dy / dist) * 2;
+                if (dist < 80 && dist > 0) {
+                  const force = (80 - dist) / 80 * 3;
+                  p.vx += (dx / dist) * force;
+                  p.vy += (dy / dist) * force;
                   p.landed = false;
                 }
               }
             }
+          }
+        }
+
+        if (totalMotionPixels > 200) {
+          let motionX = 0, count = 0;
+          for (const { gx, strength } of motionPoints) {
+            motionX += (1 - gx / W) * window.innerWidth * strength;
+            count += strength;
+          }
+          if (count > 0) {
+            motionX /= count;
+            const randomIdx = Math.floor(Math.random() * particles.length);
+            particles[randomIdx].x = motionX + (Math.random() - 0.5) * 60;
+            particles[randomIdx].y = -40;
+            particles[randomIdx].vy = 1 + Math.random() * 2;
+            particles[randomIdx].vx = (Math.random() - 0.5) * 2;
+            particles[randomIdx].landed = false;
           }
         }
       }
@@ -149,7 +289,10 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
     const loop = (ts: number) => {
       frameCountRef.current++;
-      if (frameCountRef.current % 3 === 0) detectMotion();
+      if (frameCountRef.current % 3 === 0) {
+        detectMotion();
+        checkClap();
+      }
 
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
@@ -157,6 +300,16 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         if (dragRef.current?.idx === i) continue;
 
         if (!p.landed) {
+          if (p.target && !quoteSortedRef.current) {
+            const dx = p.target.x - p.x;
+            const dy = p.target.y - p.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 200) {
+              p.vx += dx * 0.02;
+              p.vy += dy * 0.02;
+            }
+          }
+
           p.vy = Math.min(p.vy + 0.22, 14);
           p.y += p.vy;
           p.x += p.vx;
@@ -170,7 +323,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             p.vx *= 0.75;
             if (Math.abs(p.vy) < 0.8) { p.vy = 0; p.landed = true; }
           }
-          if (p.x < 5)                    { p.x = 5;                    p.vx =  Math.abs(p.vx) * 0.5; }
+          if (p.x < 5)                      { p.x = 5;                      p.vx =  Math.abs(p.vx) * 0.5; }
           if (p.x > window.innerWidth - 45) { p.x = window.innerWidth - 45; p.vx = -Math.abs(p.vx) * 0.5; }
         }
 
@@ -183,37 +336,8 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [particles]);
+  }, [particles, triggerSort]);
 
-  // Camera — manual activation
-  const startCamera = async () => {
-    if (!navigator.mediaDevices) {
-      setCameraError(true);
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 160, height: 120, facingMode: "user" },
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().then(() => { cameraReadyRef.current = true; }).catch(() => {});
-      }
-      setCameraActive(true);
-    } catch {
-      setCameraError(true);
-    }
-  };
-
-  useEffect(() => {
-    return () => {
-      cameraReadyRef.current = false;
-      streamRef.current?.getTracks().forEach(t => t.stop());
-    };
-  }, []);
-
-  // Mouse drag interaction
   const handleMouseDown = (i: number, e: React.MouseEvent) => {
     e.preventDefault();
     const p = particles[i];
@@ -267,31 +391,43 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
     >
-      {/* Camera feed — shown in corner, also used for motion detection */}
+      <style>{`
+        @keyframes clapFlash {
+          0%   { opacity: 1; }
+          100% { opacity: 0; }
+        }
+      `}</style>
+
+      {clapDetected && (
+        <div style={{
+          position: "fixed", inset: 0,
+          background: "rgba(255, 230, 102, 0.3)",
+          pointerEvents: "none",
+          zIndex: 8999,
+          animation: "clapFlash 0.6s ease forwards",
+        }} />
+      )}
+
       <video
         ref={videoRef}
+        autoPlay
         muted
         playsInline
         style={{
           position: "fixed",
-          bottom: 72,
-          right: 20,
-          width: 80,
-          height: 60,
-          borderRadius: 6,
-          opacity: cameraActive ? 0.45 : 0,
+          bottom: 80, right: 16,
+          width: 100, height: 75,
+          border: "2px solid",
+          borderColor: "#fff #555 #555 #fff",
+          opacity: cameraActive ? 0.7 : 0,
           transform: "scaleX(-1)",
+          zIndex: 8999,
           objectFit: "cover",
-          border: "1px solid rgba(0,0,0,0.15)",
-          transition: "opacity 0.4s",
-          pointerEvents: "none",
         }}
       />
 
-      {/* Hidden canvas for motion pixel comparison */}
       <canvas ref={motionCanvasRef} style={{ display: "none" }} />
 
-      {/* Letter particles */}
       {particles.map((p, i) =>
         p.isSpace ? null : (
           <div
@@ -319,7 +455,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         )
       )}
 
-      {/* Language attribution — bottom left, subtle */}
       {langOpt && (
         <div
           style={{
@@ -337,13 +472,12 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         </div>
       )}
 
-      {/* Camera interaction hint */}
       {cameraActive && (
         <div
           style={{
             position: "fixed",
-            bottom: 136,
-            right: 20,
+            bottom: 160,
+            right: 16,
             fontFamily: "'VT323', monospace",
             fontSize: 11,
             color: "rgba(0,0,0,0.3)",
@@ -355,29 +489,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         </div>
       )}
 
-      {/* Manual camera activate button */}
-      {!cameraActive && !cameraError && !cameraRequested && (
-        <button
-          onClick={() => { setCameraRequested(true); startCamera(); }}
-          style={{
-            position: "fixed",
-            bottom: 80,
-            right: 20,
-            fontFamily: "'VT323', monospace",
-            fontSize: 16,
-            background: "#C0C0C0",
-            border: "2px solid",
-            borderColor: "#fff #555 #555 #fff",
-            padding: "4px 12px",
-            cursor: "pointer",
-            zIndex: 9501,
-          }}
-        >
-          📷 activate camera
-        </button>
-      )}
-
-      {/* Camera error notice */}
       {cameraError && (
         <div
           style={{
@@ -397,7 +508,29 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         </div>
       )}
 
-      {/* Skip */}
+      {!quoteSorted && (
+        <button
+          onClick={triggerSort}
+          style={{
+            position: "fixed",
+            bottom: 80,
+            left: "50%",
+            transform: "translateX(-50%)",
+            fontFamily: "'VT323', monospace",
+            fontSize: 18,
+            background: "#C0C0C0",
+            border: "2px solid",
+            borderColor: "#fff #555 #555 #fff",
+            padding: "4px 16px",
+            cursor: "pointer",
+            zIndex: 9001,
+            letterSpacing: 1,
+          }}
+        >
+          👏 clap or click to assemble ✦
+        </button>
+      )}
+
       <div
         onClick={onClose}
         style={{
@@ -416,27 +549,30 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         ✕ skip
       </div>
 
-      {/* Save button */}
-      <button
-        onClick={() => onComplete(quote)}
-        style={{
-          position: "fixed",
-          bottom: 20,
-          left: "50%",
-          transform: "translateX(-50%)",
-          background: "#C0C0C0",
-          border: "2px solid",
-          borderColor: "#fff #555 #555 #fff",
-          padding: "6px 28px",
-          fontFamily: "'VT323', monospace",
-          fontSize: 20,
-          cursor: "pointer",
-          boxShadow: "2px 2px 0 #808080",
-          whiteSpace: "nowrap",
-        }}
-      >
-        ✦ save this quote
-      </button>
+      {quoteSorted && (
+        <button
+          onClick={() => onComplete(quote)}
+          style={{
+            position: "fixed",
+            bottom: 20,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "#000080",
+            color: "#fff",
+            border: "2px solid",
+            borderColor: "#fff #555 #555 #fff",
+            padding: "6px 28px",
+            fontFamily: "'VT323', monospace",
+            fontSize: 20,
+            cursor: "pointer",
+            boxShadow: "2px 2px 0 #808080",
+            whiteSpace: "nowrap",
+            zIndex: 9501,
+          }}
+        >
+          ✦ save this quote
+        </button>
+      )}
     </div>,
     document.body
   );
