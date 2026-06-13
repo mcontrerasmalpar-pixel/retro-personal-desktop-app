@@ -32,24 +32,27 @@ interface Particle {
   startTime: number;
   isSpace: boolean;
   target?: { x: number; y: number };
+  spawned: boolean;
 }
 
 function initParticles(quote: string): Particle[] {
-  const t0 = performance.now();
-  return quote.split("").map((char, i) => ({
+  return quote.split("").map((char) => ({
     char,
-    x: 60 + Math.random() * (window.innerWidth - 120),
-    y: -60 - Math.random() * 200,
-    vx: (Math.random() - 0.5) * 2,
-    vy: 0.5 + Math.random() * 1.5,
+    x: -1000,
+    y: -1000,
+    vx: 0,
+    vy: 0,
     font: RANSOM_FONTS[Math.floor(Math.random() * RANSOM_FONTS.length)],
     size: 24 + Math.floor(Math.random() * 20),
-    color: char.trim() === "" ? "transparent" : RANSOM_COLORS[Math.floor(Math.random() * RANSOM_COLORS.length)],
+    color: char.trim() === ""
+      ? "transparent"
+      : RANSOM_COLORS[Math.floor(Math.random() * RANSOM_COLORS.length)],
     rotation: (Math.random() - 0.5) * 25,
     rotVel: (Math.random() - 0.5) * 2,
     landed: false,
-    startTime: t0 + i * 180,
-    isSpace: char.trim() === "",
+    startTime: performance.now(),
+    isSpace: char === " ",
+    spawned: false,
   }));
 }
 
@@ -71,19 +74,54 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const rafRef = useRef(0);
   const videoRef = useRef<HTMLVideoElement>(null);
   const motionCanvasRef = useRef<HTMLCanvasElement>(null);
-  const fingerCanvasRef = useRef<HTMLCanvasElement>(null);
   const prevFrameRef = useRef<Uint8ClampedArray | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const frameCountRef = useRef(0);
   const cameraReadyRef = useRef(false);
-  const fingerPosRef = useRef<{ x: number; y: number } | null>(null);
-  const draggedParticleRef = useRef<number | null>(null);
+  const saltCooldownRef = useRef(0);
+  const unspawnedQueueRef = useRef<number[]>([]);
   const quoteSortedRef = useRef(false);
+
+  const totalNonSpace = particles.filter(p => !p.isSpace).length;
 
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState(false);
   const [quoteSorted, setQuoteSorted] = useState(false);
-  const [fingerCursor, setFingerCursor] = useState<{ x: number; y: number } | null>(null);
+  const [spawnedCount, setSpawnedCount] = useState(0);
+  const [saltFlash, setSaltFlash] = useState(false);
+
+  // Build shuffled spawn queue on mount
+  useEffect(() => {
+    const indices = particles
+      .map((p, i) => ({ p, i }))
+      .filter(({ p }) => !p.isSpace)
+      .map(({ i }) => i);
+
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+
+    unspawnedQueueRef.current = indices;
+  }, [particles]);
+
+  const spawnLetters = useCallback((fromX: number, count: number) => {
+    const queue = unspawnedQueueRef.current;
+    const actualCount = Math.min(count, queue.length);
+    if (actualCount === 0) return;
+
+    const toSpawn = queue.splice(0, actualCount);
+    toSpawn.forEach(i => {
+      particles[i].x = fromX + (Math.random() - 0.5) * 60;
+      particles[i].y = 20 + Math.random() * 40;
+      particles[i].vx = (Math.random() - 0.5) * 3;
+      particles[i].vy = 1 + Math.random() * 2;
+      particles[i].spawned = true;
+      particles[i].landed = false;
+    });
+
+    setSpawnedCount(prev => prev + actualCount);
+  }, [particles]);
 
   const triggerSort = useCallback(() => {
     const words = quote.split(" ").filter(w => w.length > 0);
@@ -105,6 +143,21 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       } else {
         targets.push({ x: cursorX, y: centerY });
         cursorX += AVG_CHAR_W;
+      }
+    }
+
+    // Flush any remaining unspawned particles to just above their targets
+    const queue = unspawnedQueueRef.current;
+    while (queue.length > 0) {
+      const i = queue.shift()!;
+      const tgt = targets[i];
+      if (tgt) {
+        particles[i].x = tgt.x;
+        particles[i].y = -60;
+        particles[i].vx = 0;
+        particles[i].vy = 0;
+        particles[i].spawned = true;
+        particles[i].landed = false;
       }
     }
 
@@ -169,87 +222,13 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
     };
   }, []);
 
-  // Physics + motion detection + finger tracking loop
+  // Physics + salt gesture loop
   useEffect(() => {
     const FLOOR = window.innerHeight - 120;
-    const GRID_W = 40;
-    const GRID_H = 30;
 
-    const detectMotion = () => {
-      if (!cameraReadyRef.current || !videoRef.current || !motionCanvasRef.current) return;
-      const ctx = motionCanvasRef.current.getContext("2d");
-      if (!ctx) return;
-
-      const W = GRID_W, H = GRID_H;
-      motionCanvasRef.current.width = W;
-      motionCanvasRef.current.height = H;
-
-      try { ctx.drawImage(videoRef.current, 0, 0, W, H); } catch { return; }
-
-      let current: Uint8ClampedArray;
-      try { current = ctx.getImageData(0, 0, W, H).data; } catch { return; }
-
-      if (prevFrameRef.current) {
-        const prev = prevFrameRef.current;
-        let totalMotionPixels = 0;
-        const motionPoints: { gx: number; strength: number }[] = [];
-
-        for (let py = 0; py < H; py += 2) {
-          for (let px = 0; px < W; px += 2) {
-            const idx = (py * W + px) * 4;
-            const diff =
-              Math.abs(current[idx]   - prev[idx]) +
-              Math.abs(current[idx+1] - prev[idx+1]) +
-              Math.abs(current[idx+2] - prev[idx+2]);
-
-            if (diff > 40) {
-              totalMotionPixels++;
-              motionPoints.push({ gx: px, strength: diff / 255 });
-
-              // Camera feed is mirrored — flip x
-              const sx = (1 - px / W) * window.innerWidth;
-              const sy = (py / H) * window.innerHeight;
-
-              for (const p of particles) {
-                if (p.isSpace) continue;
-                const dx = p.x - sx;
-                const dy = p.y - sy;
-                const dist = Math.sqrt(dx * dx + dy * dy);
-                if (dist < 80 && dist > 0) {
-                  const force = (80 - dist) / 80 * 1.2;
-                  p.vx += (dx / dist) * force;
-                  p.vy += (dy / dist) * force;
-                  p.landed = false;
-                }
-              }
-            }
-          }
-        }
-
-        if (totalMotionPixels > 200) {
-          let motionX = 0, count = 0;
-          for (const { gx, strength } of motionPoints) {
-            motionX += (1 - gx / W) * window.innerWidth * strength;
-            count += strength;
-          }
-          if (count > 0) {
-            motionX /= count;
-            const randomIdx = Math.floor(Math.random() * particles.length);
-            particles[randomIdx].x = motionX + (Math.random() - 0.5) * 60;
-            particles[randomIdx].y = -40;
-            particles[randomIdx].vy = 1 + Math.random() * 2;
-            particles[randomIdx].vx = (Math.random() - 0.5) * 2;
-            particles[randomIdx].landed = false;
-          }
-        }
-      }
-
-      prevFrameRef.current = new Uint8ClampedArray(current);
-    };
-
-    const detectFinger = () => {
+    const detectSaltGesture = () => {
       const video = videoRef.current;
-      const canvas = fingerCanvasRef.current;
+      const canvas = motionCanvasRef.current;
       if (!video || !canvas || !cameraReadyRef.current) return;
 
       const ctx = canvas.getContext("2d");
@@ -258,90 +237,64 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       const W = 80, H = 60;
       canvas.width = W;
       canvas.height = H;
-      ctx.drawImage(video, 0, 0, W, H);
-      const imageData = ctx.getImageData(0, 0, W, H);
-      const data = imageData.data;
 
-      let maxBrightness = 0;
-      let fingerGx = -1, fingerGy = -1;
+      try { ctx.drawImage(video, 0, 0, W, H); } catch { return; }
 
-      for (let y = 0; y < H; y++) {
+      let currentFrame: Uint8ClampedArray;
+      try { currentFrame = ctx.getImageData(0, 0, W, H).data; } catch { return; }
+
+      if (!prevFrameRef.current) {
+        prevFrameRef.current = new Uint8ClampedArray(currentFrame);
+        return;
+      }
+
+      const prev = prevFrameRef.current;
+      const TOP_ZONE = Math.floor(H * 0.4);
+      let totalDiff = 0;
+      let motionXSum = 0;
+      let motionCount = 0;
+
+      for (let y = 0; y < TOP_ZONE; y++) {
         for (let x = 0; x < W; x++) {
           const idx = (y * W + x) * 4;
-          const r = data[idx];
-          const g = data[idx + 1];
-          const b = data[idx + 2];
+          const diff = (
+            Math.abs(currentFrame[idx]     - prev[idx]) +
+            Math.abs(currentFrame[idx + 1] - prev[idx + 1]) +
+            Math.abs(currentFrame[idx + 2] - prev[idx + 2])
+          ) / 3;
 
-          // Skin tone: high red, medium green, low blue
-          const skinScore = r > 100 && g > 50 && b < 140 && r > g && r > b
-            ? (r - b) + (r - g) * 0.5
-            : 0;
-
-          if (skinScore > maxBrightness) {
-            maxBrightness = skinScore;
-            fingerGx = x;
-            fingerGy = y;
+          if (diff > 20) {
+            totalDiff += diff;
+            motionXSum += x;
+            motionCount++;
           }
         }
       }
 
-      if (maxBrightness > 60 && fingerGx >= 0) {
-        // Mirror X because video is mirrored
-        const screenX = (1 - fingerGx / W) * window.innerWidth;
-        const screenY = (fingerGy / H) * window.innerHeight;
-        fingerPosRef.current = { x: screenX, y: screenY };
-      } else {
-        fingerPosRef.current = null;
+      prevFrameRef.current = new Uint8ClampedArray(currentFrame);
+
+      if (totalDiff > 1500 && saltCooldownRef.current <= 0) {
+        saltCooldownRef.current = 8;
+        const motionGx = motionCount > 0 ? motionXSum / motionCount : W / 2;
+        const screenX = (1 - motionGx / W) * window.innerWidth;
+        const spawnCount = 2 + Math.floor(Math.random() * 2);
+        spawnLetters(screenX, spawnCount);
+        setSaltFlash(true);
+        setTimeout(() => setSaltFlash(false), 200);
       }
+
+      if (saltCooldownRef.current > 0) saltCooldownRef.current--;
     };
 
     const loop = (ts: number) => {
       frameCountRef.current++;
       if (frameCountRef.current % 2 === 0) {
-        detectMotion();
-        detectFinger();
-      }
-
-      // Finger drag logic
-      const finger = fingerPosRef.current;
-      if (finger) {
-        setFingerCursor({ x: finger.x, y: finger.y });
-
-        const dragging = draggedParticleRef.current;
-        if (dragging !== null) {
-          const p = particles[dragging];
-          if (p && !p.isSpace) {
-            p.x = p.x + (finger.x - p.x) * 0.4;
-            p.y = p.y + (finger.y - p.y) * 0.4;
-            p.vx = (finger.x - p.x) * 0.1;
-            p.vy = (finger.y - p.y) * 0.1;
-            p.landed = false;
-          }
-        } else {
-          let closestIdx = -1;
-          let closestDist = 50;
-          for (let i = 0; i < particles.length; i++) {
-            const p = particles[i];
-            if (p.isSpace) continue;
-            const dist = Math.sqrt((p.x - finger.x) ** 2 + (p.y - finger.y) ** 2);
-            if (dist < closestDist) {
-              closestDist = dist;
-              closestIdx = i;
-            }
-          }
-          if (closestIdx >= 0) {
-            draggedParticleRef.current = closestIdx;
-          }
-        }
-      } else {
-        draggedParticleRef.current = null;
-        setFingerCursor(null);
+        detectSaltGesture();
       }
 
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
-        if (p.isSpace || ts < p.startTime) continue;
-        if (draggedParticleRef.current === i) continue;
+        if (!p.spawned || p.isSpace) continue;
 
         if (!p.landed) {
           if (p.target && !quoteSortedRef.current) {
@@ -373,8 +326,8 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
             if (p.y > FLOOR) {
               p.y = FLOOR;
-              p.vy *= -0.25;
-              p.vx *= 0.7;
+              p.vy *= -0.2;
+              p.vx *= 0.6;
               p.landed = true;
             }
             if (p.x < 20) { p.x = 20; p.vx = Math.abs(p.vx) * 0.5; }
@@ -394,45 +347,13 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [particles, triggerSort]);
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    const mouseX = e.clientX;
-    const mouseY = e.clientY;
-    let closestIdx = -1;
-    let closestDist = 60;
-    particles.forEach((p, i) => {
-      if (p.isSpace) return;
-      const dist = Math.sqrt((p.x - mouseX) ** 2 + (p.y - mouseY) ** 2);
-      if (dist < closestDist) {
-        closestDist = dist;
-        closestIdx = i;
-      }
-    });
-    if (closestIdx >= 0) {
-      draggedParticleRef.current = closestIdx;
-    }
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (draggedParticleRef.current === null) return;
-    const p = particles[draggedParticleRef.current];
-    if (!p || p.isSpace) return;
-    p.x = e.clientX;
-    p.y = e.clientY;
-    p.vx = 0;
-    p.vy = 0;
-    p.landed = false;
-    const el = letterEls.current[draggedParticleRef.current];
-    if (el) el.style.transform = `translate(${p.x}px, ${p.y}px) rotate(${p.rotation}deg)`;
-  };
-
-  const handleMouseUp = () => {
-    draggedParticleRef.current = null;
-  };
+  }, [particles, spawnLetters]);
 
   const resolvedLang = resolveLanguage(language);
   const langOpt = LANGUAGE_OPTIONS.find(l => l.id === resolvedLang);
+
+  const allSpawned = spawnedCount >= totalNonSpace;
+  const showHint = spawnedCount === 0 && cameraActive;
 
   return createPortal(
     <div
@@ -444,9 +365,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         zIndex: 9500,
         overflow: "hidden",
       }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
     >
       <video
         ref={videoRef}
@@ -471,7 +389,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       />
 
       <canvas ref={motionCanvasRef} style={{ display: "none" }} />
-      <canvas ref={fingerCanvasRef} style={{ display: "none" }} />
 
       {particles.map((p, i) =>
         p.isSpace ? null : (
@@ -486,7 +403,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
               fontFamily: p.font,
               fontSize: p.size,
               color: p.color,
-              cursor: "grab",
               userSelect: "none",
               willChange: "transform",
               lineHeight: 1,
@@ -516,19 +432,57 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         </div>
       )}
 
+      {/* Salt gesture progress counter */}
+      {spawnedCount < totalNonSpace && (
+        <div style={{
+          position: "fixed",
+          top: 20,
+          left: "50%",
+          transform: "translateX(-50%)",
+          fontFamily: "'VT323', monospace",
+          fontSize: 16,
+          color: "rgba(0,0,0,0.4)",
+          zIndex: 8999,
+          letterSpacing: 1,
+          pointerEvents: "none",
+        }}>
+          🧂 {spawnedCount} / {totalNonSpace} letters
+        </div>
+      )}
+
+      {/* Salt gesture hint — shown until first letter spawns */}
+      {showHint && (
+        <div style={{
+          position: "fixed",
+          top: "35%",
+          left: "50%",
+          transform: "translateX(-50%)",
+          fontFamily: "'VT323', monospace",
+          fontSize: 22,
+          color: "rgba(0,0,0,0.35)",
+          textAlign: "center",
+          pointerEvents: "none",
+          zIndex: 8997,
+          lineHeight: 1.6,
+        }}>
+          🧂 raise your hand<br />
+          make a salting gesture<br />
+          <span style={{ fontSize: 14 }}>letters will fall from your fingers</span>
+        </div>
+      )}
+
+      {/* Salt emoji pulsing above camera */}
       {cameraActive && (
         <div style={{
           position: "fixed",
           bottom: 234,
           right: 16,
-          fontFamily: "'VT323', monospace",
-          fontSize: 13,
-          color: "rgba(0,0,0,0.5)",
+          fontSize: saltFlash ? 24 : 18,
+          transition: "font-size 0.1s",
           zIndex: 8999,
-          textAlign: "right",
           pointerEvents: "none",
         }}>
-          move your hands ✦
+          🧂
         </div>
       )}
 
@@ -547,28 +501,12 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             zIndex: 9501,
           }}
         >
-          camera unavailable — use mouse to catch words
+          camera unavailable
         </div>
       )}
 
-      {fingerCursor && (
-        <div style={{
-          position: "fixed",
-          left: fingerCursor.x - 12,
-          top: fingerCursor.y - 12,
-          width: 24,
-          height: 24,
-          borderRadius: "50%",
-          border: "2px solid #FF6B9D",
-          background: "rgba(255, 107, 157, 0.2)",
-          pointerEvents: "none",
-          zIndex: 8998,
-          transform: draggedParticleRef.current !== null ? "scale(1.4)" : "scale(1)",
-          transition: "transform 0.1s",
-        }} />
-      )}
-
-      {!quoteSorted && (
+      {/* Assemble button — prominent when all spawned */}
+      {allSpawned && !quoteSorted && (
         <button
           onClick={triggerSort}
           style={{
@@ -588,7 +526,32 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             boxShadow: "2px 2px 0 #808080",
           }}
         >
-          ✦ click to assemble
+          ✦ assemble the quote
+        </button>
+      )}
+
+      {/* Early assemble — dimmed, available after first letter */}
+      {!allSpawned && spawnedCount > 0 && !quoteSorted && (
+        <button
+          onClick={triggerSort}
+          style={{
+            position: "fixed",
+            bottom: 80,
+            left: "50%",
+            transform: "translateX(-50%)",
+            fontFamily: "'VT323', monospace",
+            fontSize: 14,
+            background: "#C0C0C0",
+            border: "2px solid",
+            borderColor: "#fff #555 #555 #fff",
+            padding: "3px 12px",
+            cursor: "pointer",
+            zIndex: 9001,
+            letterSpacing: 1,
+            opacity: 0.6,
+          }}
+        >
+          assemble now ({spawnedCount} letters)
         </button>
       )}
 
