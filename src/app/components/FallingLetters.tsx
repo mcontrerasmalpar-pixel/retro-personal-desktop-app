@@ -34,16 +34,6 @@ interface Particle {
   target?: { x: number; y: number };
 }
 
-interface DragState {
-  idx: number;
-  offsetX: number;
-  offsetY: number;
-  lastX: number;
-  lastY: number;
-  velX: number;
-  velY: number;
-}
-
 function initParticles(quote: string): Particle[] {
   const t0 = performance.now();
   return quote.split("").map((char, i) => ({
@@ -81,28 +71,21 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const rafRef = useRef(0);
   const videoRef = useRef<HTMLVideoElement>(null);
   const motionCanvasRef = useRef<HTMLCanvasElement>(null);
+  const fingerCanvasRef = useRef<HTMLCanvasElement>(null);
   const prevFrameRef = useRef<Uint8ClampedArray | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const dragRef = useRef<DragState | null>(null);
   const frameCountRef = useRef(0);
   const cameraReadyRef = useRef(false);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
-  const lastClapRef = useRef<number>(0);
-  const clapCountRef = useRef(0);
-  const firstClapTimeRef = useRef(0);
+  const fingerPosRef = useRef<{ x: number; y: number } | null>(null);
+  const draggedParticleRef = useRef<number | null>(null);
   const quoteSortedRef = useRef(false);
 
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState(false);
-  const [clapDetected, setClapDetected] = useState(false);
   const [quoteSorted, setQuoteSorted] = useState(false);
+  const [fingerCursor, setFingerCursor] = useState<{ x: number; y: number } | null>(null);
 
   const triggerSort = useCallback(() => {
-    setClapDetected(true);
-    setTimeout(() => setClapDetected(false), 600);
-
     const words = quote.split(" ").filter(w => w.length > 0);
     const AVG_CHAR_W = 18;
     const WORD_GAP = 24;
@@ -153,7 +136,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
     }, 1800);
   }, [quote, particles]);
 
-  // Auto-start camera and microphone on mount
+  // Auto-start camera on mount
   useEffect(() => {
     let mounted = true;
 
@@ -179,66 +162,18 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         if (mounted) setCameraError(true);
       });
 
-    navigator.mediaDevices
-      .getUserMedia({ audio: true, video: false })
-      .then(stream => {
-        if (!mounted) { stream.getTracks().forEach(t => t.stop()); return; }
-        micStreamRef.current = stream;
-        const audioCtx = new AudioContext();
-        audioCtxRef.current = audioCtx;
-        const analyser = audioCtx.createAnalyser();
-        analyserRef.current = analyser;
-        analyser.fftSize = 256;
-        const source = audioCtx.createMediaStreamSource(stream);
-        source.connect(analyser);
-      })
-      .catch(() => {
-        // mic not available — clap detection disabled, button fallback only
-      });
-
     return () => {
       mounted = false;
       cameraReadyRef.current = false;
       streamRef.current?.getTracks().forEach(t => t.stop());
-      micStreamRef.current?.getTracks().forEach(t => t.stop());
-      audioCtxRef.current?.close();
     };
   }, []);
 
-  // Physics + motion detection + clap detection loop
+  // Physics + motion detection + finger tracking loop
   useEffect(() => {
     const FLOOR = window.innerHeight - 120;
     const GRID_W = 40;
     const GRID_H = 30;
-
-    const checkClap = () => {
-      const analyser = analyserRef.current;
-      if (!analyser) return;
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      analyser.getByteFrequencyData(data);
-      const avg = data.reduce((a, b) => a + b, 0) / data.length;
-      const now = performance.now();
-
-      if (avg > 55 && now - lastClapRef.current > 300) {
-        lastClapRef.current = now;
-        if (clapCountRef.current === 0) {
-          clapCountRef.current = 1;
-          firstClapTimeRef.current = now;
-        } else if (clapCountRef.current === 1) {
-          if (now - firstClapTimeRef.current < 1500) {
-            clapCountRef.current = 0;
-            triggerSort();
-          } else {
-            clapCountRef.current = 1;
-            firstClapTimeRef.current = now;
-          }
-        }
-      }
-
-      if (clapCountRef.current === 1 && now - firstClapTimeRef.current > 2000) {
-        clapCountRef.current = 0;
-      }
-    };
 
     const detectMotion = () => {
       if (!cameraReadyRef.current || !videoRef.current || !motionCanvasRef.current) return;
@@ -312,17 +247,101 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       prevFrameRef.current = new Uint8ClampedArray(current);
     };
 
+    const detectFinger = () => {
+      const video = videoRef.current;
+      const canvas = fingerCanvasRef.current;
+      if (!video || !canvas || !cameraReadyRef.current) return;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      const W = 80, H = 60;
+      canvas.width = W;
+      canvas.height = H;
+      ctx.drawImage(video, 0, 0, W, H);
+      const imageData = ctx.getImageData(0, 0, W, H);
+      const data = imageData.data;
+
+      let maxBrightness = 0;
+      let fingerGx = -1, fingerGy = -1;
+
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const idx = (y * W + x) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+
+          // Skin tone: high red, medium green, low blue
+          const skinScore = r > 100 && g > 50 && b < 140 && r > g && r > b
+            ? (r - b) + (r - g) * 0.5
+            : 0;
+
+          if (skinScore > maxBrightness) {
+            maxBrightness = skinScore;
+            fingerGx = x;
+            fingerGy = y;
+          }
+        }
+      }
+
+      if (maxBrightness > 60 && fingerGx >= 0) {
+        // Mirror X because video is mirrored
+        const screenX = (1 - fingerGx / W) * window.innerWidth;
+        const screenY = (fingerGy / H) * window.innerHeight;
+        fingerPosRef.current = { x: screenX, y: screenY };
+      } else {
+        fingerPosRef.current = null;
+      }
+    };
+
     const loop = (ts: number) => {
       frameCountRef.current++;
-      if (frameCountRef.current % 3 === 0) {
+      if (frameCountRef.current % 2 === 0) {
         detectMotion();
-        checkClap();
+        detectFinger();
+      }
+
+      // Finger drag logic
+      const finger = fingerPosRef.current;
+      if (finger) {
+        setFingerCursor({ x: finger.x, y: finger.y });
+
+        const dragging = draggedParticleRef.current;
+        if (dragging !== null) {
+          const p = particles[dragging];
+          if (p && !p.isSpace) {
+            p.x = p.x + (finger.x - p.x) * 0.4;
+            p.y = p.y + (finger.y - p.y) * 0.4;
+            p.vx = (finger.x - p.x) * 0.1;
+            p.vy = (finger.y - p.y) * 0.1;
+            p.landed = false;
+          }
+        } else {
+          let closestIdx = -1;
+          let closestDist = 50;
+          for (let i = 0; i < particles.length; i++) {
+            const p = particles[i];
+            if (p.isSpace) continue;
+            const dist = Math.sqrt((p.x - finger.x) ** 2 + (p.y - finger.y) ** 2);
+            if (dist < closestDist) {
+              closestDist = dist;
+              closestIdx = i;
+            }
+          }
+          if (closestIdx >= 0) {
+            draggedParticleRef.current = closestIdx;
+          }
+        }
+      } else {
+        draggedParticleRef.current = null;
+        setFingerCursor(null);
       }
 
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
         if (p.isSpace || ts < p.startTime) continue;
-        if (dragRef.current?.idx === i) continue;
+        if (draggedParticleRef.current === i) continue;
 
         if (!p.landed) {
           if (p.target && !quoteSortedRef.current) {
@@ -377,41 +396,39 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
     return () => cancelAnimationFrame(rafRef.current);
   }, [particles, triggerSort]);
 
-  const handleMouseDown = (i: number, e: React.MouseEvent) => {
-    e.preventDefault();
-    const p = particles[i];
-    p.landed = false;
-    dragRef.current = {
-      idx: i,
-      offsetX: e.clientX - p.x,
-      offsetY: e.clientY - p.y,
-      lastX: e.clientX,
-      lastY: e.clientY,
-      velX: 0,
-      velY: 0,
-    };
+  const handleMouseDown = (e: React.MouseEvent) => {
+    const mouseX = e.clientX;
+    const mouseY = e.clientY;
+    let closestIdx = -1;
+    let closestDist = 60;
+    particles.forEach((p, i) => {
+      if (p.isSpace) return;
+      const dist = Math.sqrt((p.x - mouseX) ** 2 + (p.y - mouseY) ** 2);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestIdx = i;
+      }
+    });
+    if (closestIdx >= 0) {
+      draggedParticleRef.current = closestIdx;
+    }
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!dragRef.current) return;
-    const d = dragRef.current;
-    const p = particles[d.idx];
-    d.velX = e.clientX - d.lastX;
-    d.velY = e.clientY - d.lastY;
-    d.lastX = e.clientX;
-    d.lastY = e.clientY;
-    p.x = e.clientX - d.offsetX;
-    p.y = e.clientY - d.offsetY;
-    const el = letterEls.current[d.idx];
+    if (draggedParticleRef.current === null) return;
+    const p = particles[draggedParticleRef.current];
+    if (!p || p.isSpace) return;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    p.vx = 0;
+    p.vy = 0;
+    p.landed = false;
+    const el = letterEls.current[draggedParticleRef.current];
     if (el) el.style.transform = `translate(${p.x}px, ${p.y}px) rotate(${p.rotation}deg)`;
   };
 
   const handleMouseUp = () => {
-    if (!dragRef.current) return;
-    const { idx, velX, velY } = dragRef.current;
-    particles[idx].vx = velX * 0.5;
-    particles[idx].vy = velY * 0.5;
-    dragRef.current = null;
+    draggedParticleRef.current = null;
   };
 
   const resolvedLang = resolveLanguage(language);
@@ -427,26 +444,10 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         zIndex: 9500,
         overflow: "hidden",
       }}
+      onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
     >
-      <style>{`
-        @keyframes clapFlash {
-          0%   { opacity: 1; }
-          100% { opacity: 0; }
-        }
-      `}</style>
-
-      {clapDetected && (
-        <div style={{
-          position: "fixed", inset: 0,
-          background: "rgba(255, 230, 102, 0.3)",
-          pointerEvents: "none",
-          zIndex: 8999,
-          animation: "clapFlash 0.6s ease forwards",
-        }} />
-      )}
-
       <video
         ref={videoRef}
         autoPlay
@@ -454,25 +455,29 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         playsInline
         style={{
           position: "fixed",
-          bottom: 80, right: 16,
-          width: 100, height: 75,
+          bottom: 80,
+          right: 16,
+          width: 200,
+          height: 150,
           border: "2px solid",
           borderColor: "#fff #555 #555 #fff",
-          opacity: cameraActive ? 0.7 : 0,
+          boxShadow: "2px 2px 0 #808080",
+          opacity: cameraActive ? 0.9 : 0,
           transform: "scaleX(-1)",
           zIndex: 8999,
           objectFit: "cover",
+          borderRadius: 2,
         }}
       />
 
       <canvas ref={motionCanvasRef} style={{ display: "none" }} />
+      <canvas ref={fingerCanvasRef} style={{ display: "none" }} />
 
       {particles.map((p, i) =>
         p.isSpace ? null : (
           <div
             key={i}
             ref={el => { letterEls.current[i] = el; }}
-            onMouseDown={e => handleMouseDown(i, e)}
             style={{
               position: "absolute",
               left: 0,
@@ -512,18 +517,17 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       )}
 
       {cameraActive && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 160,
-            right: 16,
-            fontFamily: "'VT323', monospace",
-            fontSize: 11,
-            color: "rgba(0,0,0,0.3)",
-            pointerEvents: "none",
-            textAlign: "right",
-          }}
-        >
+        <div style={{
+          position: "fixed",
+          bottom: 234,
+          right: 16,
+          fontFamily: "'VT323', monospace",
+          fontSize: 13,
+          color: "rgba(0,0,0,0.5)",
+          zIndex: 8999,
+          textAlign: "right",
+          pointerEvents: "none",
+        }}>
           move your hands ✦
         </div>
       )}
@@ -543,8 +547,25 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             zIndex: 9501,
           }}
         >
-          📷 camera unavailable — use mouse to catch words
+          camera unavailable — use mouse to catch words
         </div>
+      )}
+
+      {fingerCursor && (
+        <div style={{
+          position: "fixed",
+          left: fingerCursor.x - 12,
+          top: fingerCursor.y - 12,
+          width: 24,
+          height: 24,
+          borderRadius: "50%",
+          border: "2px solid #FF6B9D",
+          background: "rgba(255, 107, 157, 0.2)",
+          pointerEvents: "none",
+          zIndex: 8998,
+          transform: draggedParticleRef.current !== null ? "scale(1.4)" : "scale(1)",
+          transition: "transform 0.1s",
+        }} />
       )}
 
       {!quoteSorted && (
@@ -564,9 +585,10 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             cursor: "pointer",
             zIndex: 9001,
             letterSpacing: 1,
+            boxShadow: "2px 2px 0 #808080",
           }}
         >
-          👏👏 clap twice or click to assemble ✦
+          ✦ click to assemble
         </button>
       )}
 
