@@ -4,7 +4,7 @@ import imgWindowsLogo from "../../imports/Frame31/4ddf8aabad600847e98c6e175d90fe
 import imgVolume from "../../imports/Frame31/f0283d6e426924efcb64db3925725b15d98661bf.png";
 import { FallingLetters } from "./FallingLetters";
 import { LanguagePicker } from "./LanguagePicker";
-import { getDailyQuote } from "./quotes";
+import { getDailyQuote, getTranslation } from "./quotes";
 
 const bevelBtnStyle: React.CSSProperties = {
   background: "#C0C0C0",
@@ -27,9 +27,10 @@ interface Props {
   activeWindowId: string | null;
   onOpenWallpaperPicker: () => void;
   onOpenCompanionPicker: () => void;
+  currentMood?: number;
 }
 
-export function Taskbar({ minimizedWindows, onRestoreWindow, activeWindowId, onOpenWallpaperPicker, onOpenCompanionPicker }: Props) {
+export function Taskbar({ minimizedWindows, onRestoreWindow, activeWindowId, onOpenWallpaperPicker, onOpenCompanionPicker, currentMood }: Props) {
   const [time, setTime] = useState(getTimeStr());
   const [startOpen, setStartOpen] = useState(false);
 
@@ -38,6 +39,8 @@ export function Taskbar({ minimizedWindows, onRestoreWindow, activeWindowId, onO
   );
   const [quoteRevealed, setQuoteRevealed] = useState(false);
   const [quoteText, setQuoteText] = useState("");
+  const [quoteTranslation, setQuoteTranslation] = useState<string | null>(null);
+  const [showTranslation, setShowTranslation] = useState(false);
   const [showPermissionDialog, setShowPermissionDialog] = useState(false);
   const [showLanguagePicker, setShowLanguagePicker] = useState(false);
   const [showQuoteExperience, setShowQuoteExperience] = useState(false);
@@ -64,7 +67,9 @@ export function Taskbar({ minimizedWindows, onRestoreWindow, activeWindowId, onO
   };
 
   const handleQuoteComplete = (q: string) => {
+    const translation = getTranslation(q, selectedLanguage ?? "");
     setQuoteText(q);
+    setQuoteTranslation(translation);
     setQuoteRevealed(true);
     setShowQuoteExperience(false);
   };
@@ -136,44 +141,81 @@ export function Taskbar({ minimizedWindows, onRestoreWindow, activeWindowId, onO
       ) : (
         <div
           style={{
+            position: "relative",
             display: "flex",
-            flexDirection: "column",
-            justifyContent: "center",
+            alignItems: "center",
+            height: "100%",
             padding: "0 12px",
             borderLeft: "1px solid #888",
             borderRight: "1px solid #888",
-            height: "100%",
-            flexShrink: 0,
-            maxWidth: 260,
+            cursor: quoteTranslation ? "help" : "default",
+            userSelect: "none",
           }}
+          onMouseEnter={() => quoteTranslation && setShowTranslation(true)}
+          onMouseLeave={() => setShowTranslation(false)}
         >
-          <div style={{
+          <span style={{
             fontFamily: "'VT323', monospace",
             fontSize: 14,
             color: "#333",
             fontStyle: "italic",
-            letterSpacing: 0.5,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
+            letterSpacing: 1,
           }}>
             {quoteText}
-          </div>
-          <div
-            onClick={() => setShowLanguagePicker(true)}
-            style={{
+          </span>
+
+          {quoteTranslation && (
+            <span style={{
               fontFamily: "'VT323', monospace",
               fontSize: 11,
-              color: "#808080",
-              cursor: "pointer",
-              letterSpacing: 0.3,
-              marginTop: 1,
-            }}
-            onMouseEnter={e => (e.currentTarget.style.color = "#000")}
-            onMouseLeave={e => (e.currentTarget.style.color = "#808080")}
-          >
-            change language
-          </div>
+              color: "#aaa",
+              marginLeft: 5,
+            }}>
+              ?
+            </span>
+          )}
+
+          {showTranslation && quoteTranslation && (
+            <div style={{
+              position: "absolute",
+              bottom: "calc(100% + 8px)",
+              left: "50%",
+              transform: "translateX(-50%)",
+              background: "#FFFFC0",
+              border: "1px solid #333",
+              borderRadius: 3,
+              padding: "5px 12px",
+              fontFamily: "'VT323', monospace",
+              fontSize: 15,
+              color: "#333",
+              whiteSpace: "nowrap",
+              boxShadow: "2px 2px 0 rgba(0,0,0,0.15)",
+              zIndex: 10000,
+              pointerEvents: "none",
+            }}>
+              {quoteTranslation}
+              <div style={{
+                position: "absolute",
+                bottom: -6,
+                left: "50%",
+                transform: "translateX(-50%)",
+                width: 0, height: 0,
+                borderLeft: "5px solid transparent",
+                borderRight: "5px solid transparent",
+                borderTop: "6px solid #333",
+              }} />
+              <div style={{
+                position: "absolute",
+                bottom: -4,
+                left: "50%",
+                transform: "translateX(-50%)",
+                width: 0, height: 0,
+                borderLeft: "4px solid transparent",
+                borderRight: "4px solid transparent",
+                borderTop: "5px solid #FFFFC0",
+              }} />
+            </div>
+          )}
         </div>
       )}
 
@@ -389,6 +431,7 @@ export function Taskbar({ minimizedWindows, onRestoreWindow, activeWindowId, onO
         <FallingLetters
           quote={getDailyQuote(selectedLanguage)}
           language={selectedLanguage}
+          mood={currentMood ?? 1}
           onComplete={handleQuoteComplete}
           onClose={() => setShowQuoteExperience(false)}
         />

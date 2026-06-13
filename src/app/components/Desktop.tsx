@@ -613,6 +613,7 @@ export function Desktop({ username, initialMood }: Props) {
         activeWindowId={activeId}
         onOpenWallpaperPicker={() => setWallpaperPickerOpen(true)}
         onOpenCompanionPicker={() => setCompanionPickerOpen(true)}
+        currentMood={selectedMood ?? undefined}
       />
 
       <style>{`

@@ -22,6 +22,76 @@ const PAPER_COLORS = [
   "#FCE4EC", "#E3F2FD", "#FFF3E0", "#F1F8E9",
 ];
 
+type ThermalStop = { threshold: number; r: number; g: number; b: number };
+
+const THERMAL_PALETTES: Record<number, ThermalStop[]> = {
+  0: [
+    { threshold: 0,   r: 0,   g: 0,   b: 80  },
+    { threshold: 60,  r: 80,  g: 0,   b: 120 },
+    { threshold: 120, r: 220, g: 100, b: 0   },
+    { threshold: 180, r: 255, g: 220, b: 0   },
+    { threshold: 220, r: 255, g: 255, b: 180 },
+    { threshold: 255, r: 255, g: 255, b: 255 },
+  ],
+  1: [
+    { threshold: 0,   r: 0,   g: 20,  b: 60  },
+    { threshold: 80,  r: 0,   g: 80,  b: 40  },
+    { threshold: 140, r: 180, g: 60,  b: 0   },
+    { threshold: 200, r: 255, g: 120, b: 0   },
+    { threshold: 240, r: 255, g: 180, b: 80  },
+    { threshold: 255, r: 255, g: 220, b: 160 },
+  ],
+  2: [
+    { threshold: 0,   r: 0,   g: 0,   b: 40  },
+    { threshold: 60,  r: 0,   g: 40,  b: 60  },
+    { threshold: 120, r: 0,   g: 100, b: 60  },
+    { threshold: 180, r: 40,  g: 160, b: 40  },
+    { threshold: 220, r: 120, g: 200, b: 80  },
+    { threshold: 255, r: 180, g: 240, b: 120 },
+  ],
+  3: [
+    { threshold: 0,   r: 0,   g: 0,   b: 20  },
+    { threshold: 80,  r: 0,   g: 0,   b: 80  },
+    { threshold: 140, r: 20,  g: 0,   b: 120 },
+    { threshold: 200, r: 60,  g: 0,   b: 160 },
+    { threshold: 240, r: 100, g: 40,  b: 180 },
+    { threshold: 255, r: 140, g: 80,  b: 200 },
+  ],
+  4: [
+    { threshold: 0,   r: 20,  g: 0,   b: 40  },
+    { threshold: 60,  r: 120, g: 0,   b: 80  },
+    { threshold: 120, r: 200, g: 0,   b: 60  },
+    { threshold: 180, r: 255, g: 0,   b: 100 },
+    { threshold: 220, r: 255, g: 60,  b: 180 },
+    { threshold: 255, r: 255, g: 140, b: 220 },
+  ],
+};
+
+const MOOD_THERMAL_LABELS = [
+  "white hot · great",
+  "warm · good",
+  "balanced · meh",
+  "cold · sad",
+  "intense · stressed",
+];
+
+function thermalColor(brightness: number, palette: ThermalStop[]): [number, number, number] {
+  for (let i = 0; i < palette.length - 1; i++) {
+    const curr = palette[i];
+    const next = palette[i + 1];
+    if (brightness >= curr.threshold && brightness <= next.threshold) {
+      const t = (brightness - curr.threshold) / (next.threshold - curr.threshold);
+      return [
+        Math.round(curr.r + (next.r - curr.r) * t),
+        Math.round(curr.g + (next.g - curr.g) * t),
+        Math.round(curr.b + (next.b - curr.b) * t),
+      ];
+    }
+  }
+  const last = palette[palette.length - 1];
+  return [last.r, last.g, last.b];
+}
+
 function seededRandom(seed: number): number {
   const x = Math.sin(seed + 1) * 10000;
   return x - Math.floor(x);
@@ -70,11 +140,12 @@ function initParticles(quote: string): Particle[] {
 interface FallingLettersProps {
   quote: string;
   language: string;
+  mood: number;
   onComplete: (quote: string) => void;
   onClose: () => void;
 }
 
-export function FallingLetters({ quote, language, onComplete, onClose }: FallingLettersProps) {
+export function FallingLetters({ quote, language, mood, onComplete, onClose }: FallingLettersProps) {
   const particlesRef = useRef<Particle[] | null>(null);
   if (particlesRef.current === null) {
     particlesRef.current = initParticles(quote);
@@ -94,6 +165,8 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const unspawnedQueueRef = useRef<number[]>([]);
   const targetsRef = useRef<({ x: number; y: number } | null)[]>([]);
   const quoteCompleteRef = useRef(false);
+  const moodRef = useRef(mood);
+  useEffect(() => { moodRef.current = mood; }, [mood]);
 
   const totalNonSpace = particles.filter(p => !p.isSpace).length;
 
@@ -250,41 +323,53 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       sCtx.clearRect(0, 0, SW, SH);
 
       const barMotion: number[] = new Array(NUM_BARS).fill(0);
+      const palette = THERMAL_PALETTES[moodRef.current] ?? THERMAL_PALETTES[1];
 
       for (let bar = 0; bar < NUM_BARS; bar++) {
         const videoX = Math.floor((1 - bar / NUM_BARS) * MW);
 
-        let rSum = 0, gSum = 0, bSum = 0, motionSum = 0;
+        let brightnessSum = 0;
+        let motionSum = 0;
+        const SAMPLES = MH;
 
-        for (let y = 0; y < MH; y++) {
+        for (let y = 0; y < SAMPLES; y++) {
           const idx = (y * MW + videoX) * 4;
-          rSum += currentFrame[idx];
-          gSum += currentFrame[idx + 1];
-          bSum += currentFrame[idx + 2];
+          const r = currentFrame[idx];
+          const g = currentFrame[idx + 1];
+          const b = currentFrame[idx + 2];
+
+          const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
+          brightnessSum += brightness;
 
           if (prevFrameRef.current) {
             const prev = prevFrameRef.current;
-            motionSum +=
-              Math.abs(currentFrame[idx]     - prev[idx]) +
-              Math.abs(currentFrame[idx + 1] - prev[idx + 1]) +
-              Math.abs(currentFrame[idx + 2] - prev[idx + 2]);
+            const diff = Math.abs(r - prev[idx])
+              + Math.abs(g - prev[idx + 1])
+              + Math.abs(b - prev[idx + 2]);
+            motionSum += diff;
           }
         }
 
-        const avgR = rSum / MH;
-        const avgG = gSum / MH;
-        const avgB = bSum / MH;
-        barMotion[bar] = motionSum / MH;
+        const avgBrightness = brightnessSum / SAMPLES;
+        const motionLevel = motionSum / SAMPLES;
+        barMotion[bar] = motionLevel;
 
-        const motionBoost = Math.min(1, barMotion[bar] / 30);
-        const alpha = 0.45 + motionBoost * 0.35;
+        const [tr, tg, tb] = thermalColor(avgBrightness, palette);
 
-        sCtx.fillStyle = `rgba(${Math.round(avgR)}, ${Math.round(avgG)}, ${Math.round(avgB)}, ${alpha})`;
-        sCtx.fillRect(bar * BAR_W, 0, BAR_W - 1, SH);
+        const motionBoost = Math.min(1, motionLevel / 25);
+        const boostedR = Math.min(255, tr + motionBoost * 40);
+        const boostedG = Math.min(255, tg + motionBoost * 40);
+        const boostedB = Math.min(255, tb + motionBoost * 40);
 
-        if (barMotion[bar] > 20) {
-          sCtx.fillStyle = `rgba(255, 255, 255, ${motionBoost * 0.6})`;
-          sCtx.fillRect(bar * BAR_W, 0, 2, SH);
+        const alpha = 0.55 + motionBoost * 0.25;
+        const barX = bar * BAR_W;
+
+        sCtx.fillStyle = `rgba(${Math.round(boostedR)}, ${Math.round(boostedG)}, ${Math.round(boostedB)}, ${alpha})`;
+        sCtx.fillRect(barX, 0, BAR_W - 1, SH);
+
+        if (motionLevel > 18) {
+          sCtx.fillStyle = `rgba(255, 255, 255, ${motionBoost * 0.5})`;
+          sCtx.fillRect(barX, 0, 2, SH);
         }
       }
 
@@ -438,6 +523,23 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
           pointerEvents: "none",
         }}
       />
+
+      {cameraActive && (
+        <div style={{
+          position: "fixed",
+          bottom: 234,
+          right: 16,
+          fontFamily: "'VT323', monospace",
+          fontSize: 12,
+          color: "rgba(255,255,255,0.7)",
+          zIndex: 8999,
+          textAlign: "right",
+          textShadow: "1px 1px 2px rgba(0,0,0,0.5)",
+          pointerEvents: "none",
+        }}>
+          🌡 {MOOD_THERMAL_LABELS[mood] ?? MOOD_THERMAL_LABELS[1]}
+        </div>
+      )}
 
       {particles.map((p, i) =>
         p.isSpace ? null : (
