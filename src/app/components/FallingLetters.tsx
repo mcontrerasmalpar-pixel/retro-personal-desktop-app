@@ -361,7 +361,7 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
         const boostedG = Math.min(255, tg + motionBoost * 40);
         const boostedB = Math.min(255, tb + motionBoost * 40);
 
-        const alpha = 0.85 + motionBoost * 0.15;
+        const alpha = 0.45 + motionBoost * 0.2;
         const barX = bar * BAR_W;
 
         sCtx.fillStyle = `rgba(${Math.round(boostedR)}, ${Math.round(boostedG)}, ${Math.round(boostedB)}, ${alpha})`;
@@ -507,8 +507,22 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
         }
       `}</style>
 
-      {/* Hidden video — source only, scan bars render to canvas instead */}
-      <video ref={videoRef} autoPlay muted playsInline style={{ display: "none" }} />
+      {/* Video layer — visible as base, thermal canvas overlays it */}
+      <video
+        ref={videoRef}
+        autoPlay muted playsInline
+        style={{
+          position: "fixed",
+          inset: 0,
+          width: "100vw",
+          height: "100vh",
+          objectFit: "cover",
+          transform: "scaleX(-1)",
+          zIndex: 8988,
+          opacity: 1,
+          display: "block",
+        }}
+      />
 
       <canvas ref={motionCanvasRef} style={{ display: "none" }} />
 
@@ -564,6 +578,7 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
               padding: "3px 6px",
               boxShadow: "2px 2px 4px rgba(0,0,0,0.3), 1px 1px 0 rgba(0,0,0,0.1)",
               border: "0.5px solid rgba(0,0,0,0.08)",
+              zIndex: 8998,
             } as React.CSSProperties}
           >
             {p.char}
