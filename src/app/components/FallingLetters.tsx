@@ -74,6 +74,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const rafRef = useRef(0);
   const videoRef = useRef<HTMLVideoElement>(null);
   const motionCanvasRef = useRef<HTMLCanvasElement>(null);
+  const scanCanvasRef = useRef<HTMLCanvasElement>(null);
   const prevFrameRef = useRef<Uint8ClampedArray | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const frameCountRef = useRef(0);
@@ -88,7 +89,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const [cameraError, setCameraError] = useState(false);
   const [quoteSorted, setQuoteSorted] = useState(false);
   const [spawnedCount, setSpawnedCount] = useState(0);
-  const [saltFlash, setSaltFlash] = useState(false);
 
   // Build shuffled spawn queue on mount
   useEffect(() => {
@@ -189,6 +189,19 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
     }, 1800);
   }, [quote, particles]);
 
+  // Resize scan canvas to match viewport
+  useEffect(() => {
+    const resize = () => {
+      if (scanCanvasRef.current) {
+        scanCanvasRef.current.width = window.innerWidth;
+        scanCanvasRef.current.height = window.innerHeight;
+      }
+    };
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+
   // Auto-start camera on mount
   useEffect(() => {
     let mounted = true;
@@ -222,65 +235,97 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
     };
   }, []);
 
-  // Physics + salt gesture loop
+  // Physics + scan bar loop
   useEffect(() => {
-    const FLOOR = window.innerHeight - 120;
+    const FLOOR = window.innerHeight - 160;
+    const NUM_BARS = 32;
 
-    const detectSaltGesture = () => {
+    const renderScanBars = () => {
       const video = videoRef.current;
-      const canvas = motionCanvasRef.current;
-      if (!video || !canvas || !cameraReadyRef.current) return;
+      const motionCanvas = motionCanvasRef.current;
+      const scanCanvas = scanCanvasRef.current;
+      if (!video || !motionCanvas || !scanCanvas || !cameraReadyRef.current) return;
 
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+      const mCtx = motionCanvas.getContext("2d");
+      const sCtx = scanCanvas.getContext("2d");
+      if (!mCtx || !sCtx) return;
 
-      const W = 80, H = 60;
-      canvas.width = W;
-      canvas.height = H;
+      const MW = 80, MH = 60;
+      const SW = scanCanvas.width;
+      const SH = scanCanvas.height;
+      const BAR_W = SW / NUM_BARS;
 
-      try { ctx.drawImage(video, 0, 0, W, H); } catch { return; }
+      motionCanvas.width = MW;
+      motionCanvas.height = MH;
+
+      try { mCtx.drawImage(video, 0, 0, MW, MH); } catch { return; }
 
       let currentFrame: Uint8ClampedArray;
-      try { currentFrame = ctx.getImageData(0, 0, W, H).data; } catch { return; }
+      try { currentFrame = mCtx.getImageData(0, 0, MW, MH).data; } catch { return; }
 
-      if (!prevFrameRef.current) {
-        prevFrameRef.current = new Uint8ClampedArray(currentFrame);
-        return;
-      }
+      sCtx.clearRect(0, 0, SW, SH);
 
-      const prev = prevFrameRef.current;
-      const TOP_ZONE = Math.floor(H * 0.4);
-      let totalDiff = 0;
-      let motionXSum = 0;
-      let motionCount = 0;
+      const barMotion: number[] = new Array(NUM_BARS).fill(0);
 
-      for (let y = 0; y < TOP_ZONE; y++) {
-        for (let x = 0; x < W; x++) {
-          const idx = (y * W + x) * 4;
-          const diff = (
-            Math.abs(currentFrame[idx]     - prev[idx]) +
-            Math.abs(currentFrame[idx + 1] - prev[idx + 1]) +
-            Math.abs(currentFrame[idx + 2] - prev[idx + 2])
-          ) / 3;
+      for (let bar = 0; bar < NUM_BARS; bar++) {
+        // Map bar index to video column, mirrored
+        const videoX = Math.floor((1 - bar / NUM_BARS) * MW);
 
-          if (diff > 20) {
-            totalDiff += diff;
-            motionXSum += x;
-            motionCount++;
+        let rSum = 0, gSum = 0, bSum = 0, motionSum = 0;
+
+        for (let y = 0; y < MH; y++) {
+          const idx = (y * MW + videoX) * 4;
+          rSum += currentFrame[idx];
+          gSum += currentFrame[idx + 1];
+          bSum += currentFrame[idx + 2];
+
+          if (prevFrameRef.current) {
+            const prev = prevFrameRef.current;
+            motionSum +=
+              Math.abs(currentFrame[idx]     - prev[idx]) +
+              Math.abs(currentFrame[idx + 1] - prev[idx + 1]) +
+              Math.abs(currentFrame[idx + 2] - prev[idx + 2]);
           }
+        }
+
+        const avgR = rSum / MH;
+        const avgG = gSum / MH;
+        const avgB = bSum / MH;
+        barMotion[bar] = motionSum / MH;
+
+        const motionBoost = Math.min(1, barMotion[bar] / 30);
+        const alpha = 0.45 + motionBoost * 0.35;
+
+        sCtx.fillStyle = `rgba(${Math.round(avgR)}, ${Math.round(avgG)}, ${Math.round(avgB)}, ${alpha})`;
+        sCtx.fillRect(bar * BAR_W, 0, BAR_W - 1, SH);
+
+        if (barMotion[bar] > 20) {
+          sCtx.fillStyle = `rgba(255, 255, 255, ${motionBoost * 0.6})`;
+          sCtx.fillRect(bar * BAR_W, 0, 2, SH);
         }
       }
 
       prevFrameRef.current = new Uint8ClampedArray(currentFrame);
 
-      if (totalDiff > 1500 && saltCooldownRef.current <= 0) {
-        saltCooldownRef.current = 8;
-        const motionGx = motionCount > 0 ? motionXSum / motionCount : W / 2;
-        const screenX = (1 - motionGx / W) * window.innerWidth;
-        const spawnCount = 2 + Math.floor(Math.random() * 2);
-        spawnLetters(screenX, spawnCount);
-        setSaltFlash(true);
-        setTimeout(() => setSaltFlash(false), 200);
+      if (saltCooldownRef.current <= 0) {
+        let maxMotionBar = -1;
+        let maxMotion = 25;
+
+        for (let bar = 0; bar < NUM_BARS; bar++) {
+          if (barMotion[bar] > maxMotion) {
+            maxMotion = barMotion[bar];
+            maxMotionBar = bar;
+          }
+        }
+
+        if (maxMotionBar >= 0) {
+          saltCooldownRef.current = 8;
+          const screenX = (maxMotionBar + 0.5) * BAR_W;
+          spawnLetters(screenX, 2);
+
+          sCtx.fillStyle = "rgba(255, 255, 255, 0.4)";
+          sCtx.fillRect(maxMotionBar * BAR_W, 0, BAR_W, SH);
+        }
       }
 
       if (saltCooldownRef.current > 0) saltCooldownRef.current--;
@@ -289,7 +334,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
     const loop = (ts: number) => {
       frameCountRef.current++;
       if (frameCountRef.current % 2 === 0) {
-        detectSaltGesture();
+        renderScanBars();
       }
 
       for (let i = 0; i < particles.length; i++) {
@@ -360,35 +405,28 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(255,255,255,0.87)",
+        background: "rgba(255,255,255,0.15)",
         backdropFilter: "blur(3px)",
         zIndex: 9500,
         overflow: "hidden",
       }}
     >
-      <video
-        ref={videoRef}
-        autoPlay
-        muted
-        playsInline
-        style={{
-          position: "fixed",
-          bottom: 80,
-          right: 16,
-          width: 200,
-          height: 150,
-          border: "2px solid",
-          borderColor: "#fff #555 #555 #fff",
-          boxShadow: "2px 2px 0 #808080",
-          opacity: cameraActive ? 0.9 : 0,
-          transform: "scaleX(-1)",
-          zIndex: 8999,
-          objectFit: "cover",
-          borderRadius: 2,
-        }}
-      />
+      {/* Hidden video — source only, scan bars render to canvas instead */}
+      <video ref={videoRef} autoPlay muted playsInline style={{ display: "none" }} />
 
       <canvas ref={motionCanvasRef} style={{ display: "none" }} />
+
+      <canvas
+        ref={scanCanvasRef}
+        style={{
+          position: "fixed",
+          inset: 0,
+          width: "100vw",
+          height: "100vh",
+          zIndex: 8990,
+          pointerEvents: "none",
+        }}
+      />
 
       {particles.map((p, i) =>
         p.isSpace ? null : (
@@ -465,24 +503,27 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
           zIndex: 8997,
           lineHeight: 1.6,
         }}>
-          🧂 raise your hand<br />
-          make a salting gesture<br />
+          🧂 just move<br />
           <span style={{ fontSize: 14 }}>letters will fall from your fingers</span>
         </div>
       )}
 
-      {/* Salt emoji pulsing above camera */}
-      {cameraActive && (
+      {/* Bottom hint — shown while camera is active and no spawns yet */}
+      {cameraActive && showHint && (
         <div style={{
           position: "fixed",
-          bottom: 234,
-          right: 16,
-          fontSize: saltFlash ? 24 : 18,
-          transition: "font-size 0.1s",
+          bottom: 170,
+          left: "50%",
+          transform: "translateX(-50%)",
+          fontFamily: "'VT323', monospace",
+          fontSize: 18,
+          color: "rgba(0,0,0,0.5)",
           zIndex: 8999,
+          textAlign: "center",
           pointerEvents: "none",
+          letterSpacing: 1,
         }}>
-          🧂
+          🧂 just move — letters will fall
         </div>
       )}
 
