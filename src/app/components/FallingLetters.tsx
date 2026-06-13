@@ -357,9 +357,10 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
         const [tr, tg, tb] = thermalColor(avgBrightness, palette);
 
         const motionBoost = Math.min(1, motionLevel / 25);
-        const boostedR = Math.min(255, tr + motionBoost * 40);
-        const boostedG = Math.min(255, tg + motionBoost * 40);
-        const boostedB = Math.min(255, tb + motionBoost * 40);
+        const contrastFactor = 1.8;
+        const boostedR = Math.min(255, Math.max(0, 128 + (tr - 128) * contrastFactor + motionBoost * 40));
+        const boostedG = Math.min(255, Math.max(0, 128 + (tg - 128) * contrastFactor + motionBoost * 40));
+        const boostedB = Math.min(255, Math.max(0, 128 + (tb - 128) * contrastFactor + motionBoost * 40));
 
         const alpha = 0.45 + motionBoost * 0.2;
         const barX = bar * BAR_W;
