@@ -17,6 +17,16 @@ const RANSOM_COLORS = [
   "#FF6B9D", "#4D9DE0", "#E15FED", "#8B4513",
 ];
 
+const PAPER_COLORS = [
+  "#FFFDE7", "#FFF8E1", "#F3E5F5", "#E8F5E9",
+  "#FCE4EC", "#E3F2FD", "#FFF3E0", "#F1F8E9",
+];
+
+function seededRandom(seed: number): number {
+  const x = Math.sin(seed + 1) * 10000;
+  return x - Math.floor(x);
+}
+
 interface Particle {
   char: string;
   x: number;
@@ -33,6 +43,7 @@ interface Particle {
   isSpace: boolean;
   target?: { x: number; y: number };
   spawned: boolean;
+  spawnTime?: number;
 }
 
 function initParticles(quote: string): Particle[] {
@@ -43,7 +54,7 @@ function initParticles(quote: string): Particle[] {
     vx: 0,
     vy: 0,
     font: RANSOM_FONTS[Math.floor(Math.random() * RANSOM_FONTS.length)],
-    size: 24 + Math.floor(Math.random() * 20),
+    size: 36 + Math.floor(Math.random() * 24),
     color: char.trim() === ""
       ? "transparent"
       : RANSOM_COLORS[Math.floor(Math.random() * RANSOM_COLORS.length)],
@@ -117,6 +128,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       particles[i].vx = (Math.random() - 0.5) * 3;
       particles[i].vy = 1 + Math.random() * 2;
       particles[i].spawned = true;
+      particles[i].spawnTime = performance.now();
       particles[i].landed = false;
     });
 
@@ -307,6 +319,13 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
       prevFrameRef.current = new Uint8ClampedArray(currentFrame);
 
+      // Subtle gradient in lower half so letters stand out
+      const gradient = sCtx.createLinearGradient(0, SH * 0.5, 0, SH);
+      gradient.addColorStop(0, "rgba(0,0,0,0)");
+      gradient.addColorStop(1, "rgba(0,0,0,0.15)");
+      sCtx.fillStyle = gradient;
+      sCtx.fillRect(0, SH * 0.5, SW, SH * 0.5);
+
       if (saltCooldownRef.current <= 0) {
         let maxMotionBar = -1;
         let maxMotion = 25;
@@ -384,7 +403,11 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         }
 
         const el = letterEls.current[i];
-        if (el) el.style.transform = `translate(${p.x}px, ${p.y}px) rotate(${p.rotation}deg)`;
+        if (el) {
+          const age = p.spawnTime ? ts - p.spawnTime : 999;
+          const spawnScale = age < 300 ? age / 300 : 1;
+          el.style.transform = `translate(${p.x}px, ${p.y}px) rotate(${p.rotation}deg) scale(${spawnScale})`;
+        }
       }
 
       rafRef.current = requestAnimationFrame(loop);
@@ -405,8 +428,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(255,255,255,0.15)",
-        backdropFilter: "blur(3px)",
+        background: "transparent",
         zIndex: 9500,
         overflow: "hidden",
       }}
@@ -441,11 +463,16 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
               fontFamily: p.font,
               fontSize: p.size,
               color: p.color,
+              fontWeight: seededRandom(i * 37) > 0.4 ? 700 : 400,
+              fontStyle: seededRandom(i * 41) > 0.7 ? "italic" : "normal",
               userSelect: "none",
               willChange: "transform",
               lineHeight: 1,
               whiteSpace: "nowrap",
-              WebkitTextStroke: "0.4px rgba(0,0,0,0.08)",
+              background: PAPER_COLORS[Math.floor(seededRandom(i * 53) * PAPER_COLORS.length)],
+              padding: "3px 6px",
+              boxShadow: "2px 2px 4px rgba(0,0,0,0.3), 1px 1px 0 rgba(0,0,0,0.1)",
+              border: "0.5px solid rgba(0,0,0,0.08)",
             } as React.CSSProperties}
           >
             {p.char}
@@ -556,15 +583,15 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             left: "50%",
             transform: "translateX(-50%)",
             fontFamily: "'VT323', monospace",
-            fontSize: 18,
-            background: "#C0C0C0",
-            border: "2px solid",
-            borderColor: "#fff #555 #555 #fff",
-            padding: "4px 16px",
+            fontSize: 20,
+            background: "#000080",
+            color: "white",
+            border: "2px solid white",
+            boxShadow: "2px 2px 0 rgba(0,0,0,0.4)",
+            padding: "6px 20px",
             cursor: "pointer",
             zIndex: 9001,
-            letterSpacing: 1,
-            boxShadow: "2px 2px 0 #808080",
+            letterSpacing: 2,
           }}
         >
           ✦ assemble the quote
@@ -582,14 +609,15 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             transform: "translateX(-50%)",
             fontFamily: "'VT323', monospace",
             fontSize: 14,
-            background: "#C0C0C0",
-            border: "2px solid",
-            borderColor: "#fff #555 #555 #fff",
-            padding: "3px 12px",
+            background: "#000080",
+            color: "white",
+            border: "2px solid white",
+            boxShadow: "2px 2px 0 rgba(0,0,0,0.4)",
+            padding: "4px 14px",
             cursor: "pointer",
             zIndex: 9001,
             letterSpacing: 1,
-            opacity: 0.6,
+            opacity: 0.65,
           }}
         >
           assemble now ({spawnedCount} letters)
