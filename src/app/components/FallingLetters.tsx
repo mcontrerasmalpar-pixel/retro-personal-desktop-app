@@ -361,7 +361,7 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
         const boostedG = Math.min(255, tg + motionBoost * 40);
         const boostedB = Math.min(255, tb + motionBoost * 40);
 
-        const alpha = 0.55 + motionBoost * 0.25;
+        const alpha = 0.85 + motionBoost * 0.15;
         const barX = bar * BAR_W;
 
         sCtx.fillStyle = `rgba(${Math.round(boostedR)}, ${Math.round(boostedG)}, ${Math.round(boostedB)}, ${alpha})`;
@@ -495,7 +495,7 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
       style={{
         position: "fixed",
         inset: 0,
-        background: "transparent",
+        background: "#000000",
         zIndex: 9500,
         overflow: "hidden",
       }}
@@ -597,7 +597,7 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
           transform: "translateX(-50%)",
           fontFamily: "'VT323', monospace",
           fontSize: 18,
-          color: "rgba(0,0,0,0.5)",
+          color: "rgba(255,255,255,0.5)",
           zIndex: 8999,
           textAlign: "center",
           pointerEvents: "none",
@@ -619,7 +619,7 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
           transform: "translateX(-50%)",
           fontFamily: "'VT323', monospace",
           fontSize: 22,
-          color: "rgba(0,0,0,0.35)",
+          color: "rgba(255,255,255,0.5)",
           textAlign: "center",
           pointerEvents: "none",
           zIndex: 8997,
@@ -658,10 +658,9 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
             bottom: 80,
             left: "50%",
             animation: "fadeIn 0.4s ease forwards",
-            background: "#000080",
-            color: "#fff",
-            border: "2px solid",
-            borderColor: "#fff #555 #555 #fff",
+            background: "#FFFFC0",
+            color: "#000",
+            border: "2px solid #333",
             padding: "8px 28px",
             fontFamily: "'VT323', monospace",
             fontSize: 22,
