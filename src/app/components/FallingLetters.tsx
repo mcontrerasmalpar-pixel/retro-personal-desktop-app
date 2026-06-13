@@ -92,14 +92,46 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const cameraReadyRef = useRef(false);
   const saltCooldownRef = useRef(0);
   const unspawnedQueueRef = useRef<number[]>([]);
-  const quoteSortedRef = useRef(false);
+  const targetsRef = useRef<({ x: number; y: number } | null)[]>([]);
+  const quoteCompleteRef = useRef(false);
 
   const totalNonSpace = particles.filter(p => !p.isSpace).length;
 
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState(false);
-  const [quoteSorted, setQuoteSorted] = useState(false);
+  const [quoteComplete, setQuoteComplete] = useState(false);
   const [spawnedCount, setSpawnedCount] = useState(0);
+
+  const calculateTargets = useCallback(() => {
+    const words = quote.split(" ").filter(w => w.length > 0);
+    const AVG_CHAR_W = 18;
+    const WORD_GAP = 24;
+    const totalWidth = words.reduce((acc, w) => acc + w.length * AVG_CHAR_W, 0)
+      + (words.length - 1) * WORD_GAP;
+    const centerX = window.innerWidth / 2;
+    const centerY = window.innerHeight * 0.42;
+    let cursorX = centerX - totalWidth / 2;
+
+    const allChars = quote.split("");
+    const result: ({ x: number; y: number } | null)[] = [];
+
+    for (let i = 0; i < allChars.length; i++) {
+      if (allChars[i] === " ") {
+        result.push({ x: cursorX, y: centerY });
+        cursorX += WORD_GAP;
+      } else {
+        result.push({ x: cursorX, y: centerY });
+        cursorX += AVG_CHAR_W;
+      }
+    }
+
+    return result;
+  }, [quote]);
+
+  // Pre-calculate targets on mount
+  useEffect(() => {
+    targetsRef.current = calculateTargets();
+  }, [calculateTargets]);
 
   // Build shuffled spawn queue on mount
   useEffect(() => {
@@ -122,84 +154,25 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
     if (actualCount === 0) return;
 
     const toSpawn = queue.splice(0, actualCount);
-    toSpawn.forEach(i => {
-      particles[i].x = fromX + (Math.random() - 0.5) * 60;
-      particles[i].y = 20 + Math.random() * 40;
-      particles[i].vx = (Math.random() - 0.5) * 3;
-      particles[i].vy = 1 + Math.random() * 2;
-      particles[i].spawned = true;
-      particles[i].spawnTime = performance.now();
-      particles[i].landed = false;
+    toSpawn.forEach((idx, spawnIdx) => {
+      const spreadOffset = (spawnIdx - (actualCount - 1) / 2) * 120;
+      const spawnX = Math.max(60, Math.min(
+        window.innerWidth - 60,
+        fromX + spreadOffset + (Math.random() - 0.5) * 40
+      ));
+
+      particles[idx].x = spawnX;
+      particles[idx].y = -60 - Math.random() * 40;
+      particles[idx].vx = (Math.random() - 0.5) * 2;
+      particles[idx].vy = 2 + Math.random() * 2;
+      particles[idx].spawned = true;
+      particles[idx].landed = false;
+      particles[idx].spawnTime = performance.now();
+      particles[idx].target = targetsRef.current[idx] ?? undefined;
     });
 
     setSpawnedCount(prev => prev + actualCount);
   }, [particles]);
-
-  const triggerSort = useCallback(() => {
-    const words = quote.split(" ").filter(w => w.length > 0);
-    const AVG_CHAR_W = 18;
-    const WORD_GAP = 24;
-    const totalWidth = words.reduce((acc, w) => acc + w.length * AVG_CHAR_W, 0)
-      + (words.length - 1) * WORD_GAP;
-    const centerX = window.innerWidth / 2;
-    const centerY = window.innerHeight * 0.45;
-    let cursorX = centerX - totalWidth / 2;
-
-    const allChars = quote.split("");
-    const targets: { x: number; y: number }[] = [];
-
-    for (let i = 0; i < allChars.length; i++) {
-      if (allChars[i] === " ") {
-        targets.push({ x: cursorX, y: centerY });
-        cursorX += WORD_GAP;
-      } else {
-        targets.push({ x: cursorX, y: centerY });
-        cursorX += AVG_CHAR_W;
-      }
-    }
-
-    // Flush any remaining unspawned particles to just above their targets
-    const queue = unspawnedQueueRef.current;
-    while (queue.length > 0) {
-      const i = queue.shift()!;
-      const tgt = targets[i];
-      if (tgt) {
-        particles[i].x = tgt.x;
-        particles[i].y = -60;
-        particles[i].vx = 0;
-        particles[i].vy = 0;
-        particles[i].spawned = true;
-        particles[i].landed = false;
-      }
-    }
-
-    for (let i = 0; i < particles.length; i++) {
-      const tgt = targets[i];
-      if (!tgt) continue;
-      const dx = tgt.x - particles[i].x;
-      const dy = tgt.y - particles[i].y;
-      particles[i].vx = dx * 0.12;
-      particles[i].vy = dy * 0.12;
-      particles[i].landed = false;
-      particles[i].target = tgt;
-    }
-
-    setTimeout(() => {
-      for (let i = 0; i < particles.length; i++) {
-        const tgt = targets[i];
-        if (!tgt) continue;
-        particles[i].x = tgt.x;
-        particles[i].y = tgt.y;
-        particles[i].vx = 0;
-        particles[i].vy = 0;
-        particles[i].rotation = (Math.random() - 0.5) * 8;
-        particles[i].landed = true;
-        particles[i].target = undefined;
-      }
-      quoteSortedRef.current = true;
-      setQuoteSorted(true);
-    }, 1800);
-  }, [quote, particles]);
 
   // Resize scan canvas to match viewport
   useEffect(() => {
@@ -249,7 +222,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
   // Physics + scan bar loop
   useEffect(() => {
-    const FLOOR = window.innerHeight - 160;
     const NUM_BARS = 32;
 
     const renderScanBars = () => {
@@ -280,7 +252,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       const barMotion: number[] = new Array(NUM_BARS).fill(0);
 
       for (let bar = 0; bar < NUM_BARS; bar++) {
-        // Map bar index to video column, mirrored
         const videoX = Math.floor((1 - bar / NUM_BARS) * MW);
 
         let rSum = 0, gSum = 0, bSum = 0, motionSum = 0;
@@ -319,7 +290,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
       prevFrameRef.current = new Uint8ClampedArray(currentFrame);
 
-      // Subtle gradient in lower half so letters stand out
       const gradient = sCtx.createLinearGradient(0, SH * 0.5, 0, SH);
       gradient.addColorStop(0, "rgba(0,0,0,0)");
       gradient.addColorStop(1, "rgba(0,0,0,0.15)");
@@ -361,44 +331,43 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         if (!p.spawned || p.isSpace) continue;
 
         if (!p.landed) {
-          if (p.target && !quoteSortedRef.current) {
+          const age = p.spawnTime ? ts - p.spawnTime : 999;
+
+          if (p.target && age > 400) {
+            // Spring toward target after 400ms free fall
             const dx = p.target.x - p.x;
             const dy = p.target.y - p.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist < 3) {
+
+            if (dist < 4) {
               p.x = p.target.x;
               p.y = p.target.y;
               p.vx = 0;
               p.vy = 0;
+              p.rotation = (Math.random() - 0.5) * 10;
               p.landed = true;
             } else {
-              p.vx = p.vx * 0.7 + dx * 0.15;
-              p.vy = p.vy * 0.7 + dy * 0.15;
-              p.y += p.vy;
+              p.vx = p.vx * 0.75 + dx * 0.12;
+              p.vy = p.vy * 0.75 + dy * 0.12;
+              p.vx = Math.max(-18, Math.min(18, p.vx));
+              p.vy = Math.max(-18, Math.min(18, p.vy));
               p.x += p.vx;
+              p.y += p.vy;
             }
           } else {
-            p.vy += 0.08;
-            p.vx = Math.max(-6, Math.min(6, p.vx));
-            p.vy = Math.max(-6, Math.min(8, p.vy));
-            p.y += p.vy;
-            p.x += p.vx;
-            p.vx *= 0.88;
-            p.vy *= 0.92;
-            p.rotation += p.rotVel;
-            p.rotVel *= 0.97;
-
-            if (p.y > FLOOR) {
-              p.y = FLOOR;
-              p.vy *= -0.2;
-              p.vx *= 0.6;
-              p.landed = true;
-            }
-            if (p.x < 20) { p.x = 20; p.vx = Math.abs(p.vx) * 0.5; }
-            if (p.x > window.innerWidth - 20) {
-              p.x = window.innerWidth - 20;
+            // Free fall for first 400ms
+            p.vy += 0.15;
+            p.vx *= 0.95;
+            p.vy = Math.min(p.vy, 12);
+            if (p.x < 30) { p.x = 30; p.vx = Math.abs(p.vx) * 0.5; }
+            if (p.x > window.innerWidth - 30) {
+              p.x = window.innerWidth - 30;
               p.vx = -Math.abs(p.vx) * 0.5;
             }
+            p.x += p.vx;
+            p.y += p.vy;
+            p.rotation += p.rotVel;
+            p.rotVel *= 0.97;
           }
         }
 
@@ -407,6 +376,22 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
           const age = p.spawnTime ? ts - p.spawnTime : 999;
           const spawnScale = age < 300 ? age / 300 : 1;
           el.style.transform = `translate(${p.x}px, ${p.y}px) rotate(${p.rotation}deg) scale(${spawnScale})`;
+        }
+      }
+
+      // Check if all letters have landed and none remain unspawned
+      if (unspawnedQueueRef.current.length === 0 && !quoteCompleteRef.current) {
+        let allLanded = true;
+        let anySpawned = false;
+        for (const p of particles) {
+          if (p.isSpace) continue;
+          if (!p.spawned) { allLanded = false; break; }
+          if (!p.landed) { allLanded = false; break; }
+          anySpawned = true;
+        }
+        if (allLanded && anySpawned) {
+          quoteCompleteRef.current = true;
+          setQuoteComplete(true);
         }
       }
 
@@ -420,9 +405,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const resolvedLang = resolveLanguage(language);
   const langOpt = LANGUAGE_OPTIONS.find(l => l.id === resolvedLang);
 
-  const allSpawned = spawnedCount >= totalNonSpace;
-  const showHint = spawnedCount === 0 && cameraActive;
-
   return createPortal(
     <div
       style={{
@@ -433,6 +415,13 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         overflow: "hidden",
       }}
     >
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+          to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+      `}</style>
+
       {/* Hidden video — source only, scan bars render to canvas instead */}
       <video ref={videoRef} autoPlay muted playsInline style={{ display: "none" }} />
 
@@ -497,26 +486,30 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         </div>
       )}
 
-      {/* Salt gesture progress counter */}
-      {spawnedCount < totalNonSpace && (
+      {/* Progress hint — "just move" or "N more..." */}
+      {!quoteComplete && spawnedCount < totalNonSpace && (
         <div style={{
           position: "fixed",
-          top: 20,
+          bottom: 90,
           left: "50%",
           transform: "translateX(-50%)",
           fontFamily: "'VT323', monospace",
-          fontSize: 16,
-          color: "rgba(0,0,0,0.4)",
+          fontSize: 18,
+          color: "rgba(0,0,0,0.5)",
           zIndex: 8999,
-          letterSpacing: 1,
+          textAlign: "center",
           pointerEvents: "none",
+          letterSpacing: 1,
         }}>
-          🧂 {spawnedCount} / {totalNonSpace} letters
+          {spawnedCount === 0
+            ? "🧂 just move — letters will fall"
+            : `${totalNonSpace - spawnedCount} more...`
+          }
         </div>
       )}
 
-      {/* Salt gesture hint — shown until first letter spawns */}
-      {showHint && (
+      {/* Center hint — shown until first letter spawns */}
+      {spawnedCount === 0 && cameraActive && (
         <div style={{
           position: "fixed",
           top: "35%",
@@ -532,25 +525,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         }}>
           🧂 just move<br />
           <span style={{ fontSize: 14 }}>letters will fall from your fingers</span>
-        </div>
-      )}
-
-      {/* Bottom hint — shown while camera is active and no spawns yet */}
-      {cameraActive && showHint && (
-        <div style={{
-          position: "fixed",
-          bottom: 170,
-          left: "50%",
-          transform: "translateX(-50%)",
-          fontFamily: "'VT323', monospace",
-          fontSize: 18,
-          color: "rgba(0,0,0,0.5)",
-          zIndex: 8999,
-          textAlign: "center",
-          pointerEvents: "none",
-          letterSpacing: 1,
-        }}>
-          🧂 just move — letters will fall
         </div>
       )}
 
@@ -573,54 +547,30 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
         </div>
       )}
 
-      {/* Assemble button — prominent when all spawned */}
-      {allSpawned && !quoteSorted && (
+      {/* Auto-save button — fades in when all letters have landed */}
+      {quoteComplete && (
         <button
-          onClick={triggerSort}
+          onClick={() => onComplete(quote)}
           style={{
             position: "fixed",
             bottom: 80,
             left: "50%",
-            transform: "translateX(-50%)",
-            fontFamily: "'VT323', monospace",
-            fontSize: 20,
+            animation: "fadeIn 0.4s ease forwards",
             background: "#000080",
-            color: "white",
-            border: "2px solid white",
-            boxShadow: "2px 2px 0 rgba(0,0,0,0.4)",
-            padding: "6px 20px",
+            color: "#fff",
+            border: "2px solid",
+            borderColor: "#fff #555 #555 #fff",
+            padding: "8px 28px",
+            fontFamily: "'VT323', monospace",
+            fontSize: 22,
             cursor: "pointer",
-            zIndex: 9001,
+            boxShadow: "2px 2px 0 #808080",
+            whiteSpace: "nowrap",
             letterSpacing: 2,
+            zIndex: 9501,
           }}
         >
-          ✦ assemble the quote
-        </button>
-      )}
-
-      {/* Early assemble — dimmed, available after first letter */}
-      {!allSpawned && spawnedCount > 0 && !quoteSorted && (
-        <button
-          onClick={triggerSort}
-          style={{
-            position: "fixed",
-            bottom: 80,
-            left: "50%",
-            transform: "translateX(-50%)",
-            fontFamily: "'VT323', monospace",
-            fontSize: 14,
-            background: "#000080",
-            color: "white",
-            border: "2px solid white",
-            boxShadow: "2px 2px 0 rgba(0,0,0,0.4)",
-            padding: "4px 14px",
-            cursor: "pointer",
-            zIndex: 9001,
-            letterSpacing: 1,
-            opacity: 0.65,
-          }}
-        >
-          assemble now ({spawnedCount} letters)
+          ✦ save this quote
         </button>
       )}
 
@@ -641,31 +591,6 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       >
         ✕ skip
       </div>
-
-      {quoteSorted && (
-        <button
-          onClick={() => onComplete(quote)}
-          style={{
-            position: "fixed",
-            bottom: 20,
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "#000080",
-            color: "#fff",
-            border: "2px solid",
-            borderColor: "#fff #555 #555 #fff",
-            padding: "6px 28px",
-            fontFamily: "'VT323', monospace",
-            fontSize: 20,
-            cursor: "pointer",
-            boxShadow: "2px 2px 0 #808080",
-            whiteSpace: "nowrap",
-            zIndex: 9501,
-          }}
-        >
-          ✦ save this quote
-        </button>
-      )}
     </div>,
     document.body
   );
