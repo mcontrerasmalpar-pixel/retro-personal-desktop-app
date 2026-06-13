@@ -104,12 +104,12 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
   const calculateTargets = useCallback(() => {
     const words = quote.split(" ").filter(w => w.length > 0);
-    const AVG_CHAR_W = 18;
-    const WORD_GAP = 24;
+    const AVG_CHAR_W = 38;
+    const WORD_GAP = 52;
     const totalWidth = words.reduce((acc, w) => acc + w.length * AVG_CHAR_W, 0)
       + (words.length - 1) * WORD_GAP;
     const centerX = window.innerWidth / 2;
-    const centerY = window.innerHeight * 0.42;
+    const centerY = window.innerHeight * 0.38;
     let cursorX = centerX - totalWidth / 2;
 
     const allChars = quote.split("");
@@ -155,7 +155,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
     const toSpawn = queue.splice(0, actualCount);
     toSpawn.forEach((idx, spawnIdx) => {
-      const spreadOffset = (spawnIdx - (actualCount - 1) / 2) * 120;
+      const spreadOffset = (spawnIdx - actualCount / 2) * 160;
       const spawnX = Math.max(60, Math.min(
         window.innerWidth - 60,
         fromX + spreadOffset + (Math.random() - 0.5) * 40
