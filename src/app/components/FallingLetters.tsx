@@ -90,6 +90,8 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
   const analyserRef = useRef<AnalyserNode | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const lastClapRef = useRef<number>(0);
+  const clapCountRef = useRef(0);
+  const firstClapTimeRef = useRef(0);
   const quoteSortedRef = useRef(false);
 
   const [cameraActive, setCameraActive] = useState(false);
@@ -101,47 +103,54 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
     setClapDetected(true);
     setTimeout(() => setClapDetected(false), 600);
 
-    const words = quote.split(" ");
-    const centerY = window.innerHeight * 0.5;
-    const totalWidth = words.length * 80;
-    const startX = (window.innerWidth - totalWidth) / 2;
+    const words = quote.split(" ").filter(w => w.length > 0);
+    const AVG_CHAR_W = 18;
+    const WORD_GAP = 24;
+    const totalWidth = words.reduce((acc, w) => acc + w.length * AVG_CHAR_W, 0)
+      + (words.length - 1) * WORD_GAP;
+    const centerX = window.innerWidth / 2;
+    const centerY = window.innerHeight * 0.45;
+    let cursorX = centerX - totalWidth / 2;
 
-    let charIdx = 0;
+    const allChars = quote.split("");
     const targets: { x: number; y: number }[] = [];
 
-    for (let w = 0; w < words.length; w++) {
-      const word = words[w];
-      const wordX = startX + w * 85;
-      for (let c = 0; c < word.length; c++) {
-        targets[charIdx] = { x: wordX + c * 22, y: centerY };
-        charIdx++;
-      }
-      if (w < words.length - 1) {
-        targets[charIdx] = { x: wordX + word.length * 22 + 10, y: centerY };
-        charIdx++;
+    for (let i = 0; i < allChars.length; i++) {
+      if (allChars[i] === " ") {
+        targets.push({ x: cursorX, y: centerY });
+        cursorX += WORD_GAP;
+      } else {
+        targets.push({ x: cursorX, y: centerY });
+        cursorX += AVG_CHAR_W;
       }
     }
 
     for (let i = 0; i < particles.length; i++) {
-      if (!targets[i]) continue;
-      particles[i].vx = (targets[i].x - particles[i].x) * 0.15;
-      particles[i].vy = (targets[i].y - particles[i].y) * 0.15;
+      const tgt = targets[i];
+      if (!tgt) continue;
+      const dx = tgt.x - particles[i].x;
+      const dy = tgt.y - particles[i].y;
+      particles[i].vx = dx * 0.12;
+      particles[i].vy = dy * 0.12;
       particles[i].landed = false;
-      particles[i].target = targets[i];
+      particles[i].target = tgt;
     }
 
     setTimeout(() => {
       for (let i = 0; i < particles.length; i++) {
-        if (!targets[i]) continue;
-        particles[i].x = targets[i].x;
-        particles[i].y = targets[i].y;
+        const tgt = targets[i];
+        if (!tgt) continue;
+        particles[i].x = tgt.x;
+        particles[i].y = tgt.y;
         particles[i].vx = 0;
         particles[i].vy = 0;
+        particles[i].rotation = (Math.random() - 0.5) * 8;
         particles[i].landed = true;
+        particles[i].target = undefined;
       }
       quoteSortedRef.current = true;
       setQuoteSorted(true);
-    }, 1500);
+    }, 1800);
   }, [quote, particles]);
 
   // Auto-start camera and microphone on mount
@@ -198,7 +207,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
 
   // Physics + motion detection + clap detection loop
   useEffect(() => {
-    const FLOOR = window.innerHeight - 110;
+    const FLOOR = window.innerHeight - 120;
     const GRID_W = 40;
     const GRID_H = 30;
 
@@ -209,9 +218,25 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
       analyser.getByteFrequencyData(data);
       const avg = data.reduce((a, b) => a + b, 0) / data.length;
       const now = performance.now();
-      if (avg > 60 && now - lastClapRef.current > 800) {
+
+      if (avg > 55 && now - lastClapRef.current > 300) {
         lastClapRef.current = now;
-        triggerSort();
+        if (clapCountRef.current === 0) {
+          clapCountRef.current = 1;
+          firstClapTimeRef.current = now;
+        } else if (clapCountRef.current === 1) {
+          if (now - firstClapTimeRef.current < 1500) {
+            clapCountRef.current = 0;
+            triggerSort();
+          } else {
+            clapCountRef.current = 1;
+            firstClapTimeRef.current = now;
+          }
+        }
+      }
+
+      if (clapCountRef.current === 1 && now - firstClapTimeRef.current > 2000) {
+        clapCountRef.current = 0;
       }
     };
 
@@ -256,7 +281,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
                 const dy = p.y - sy;
                 const dist = Math.sqrt(dx * dx + dy * dy);
                 if (dist < 80 && dist > 0) {
-                  const force = (80 - dist) / 80 * 3;
+                  const force = (80 - dist) / 80 * 1.2;
                   p.vx += (dx / dist) * force;
                   p.vy += (dy / dist) * force;
                   p.landed = false;
@@ -304,27 +329,41 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             const dx = p.target.x - p.x;
             const dy = p.target.y - p.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
-            if (dist < 200) {
-              p.vx += dx * 0.02;
-              p.vy += dy * 0.02;
+            if (dist < 3) {
+              p.x = p.target.x;
+              p.y = p.target.y;
+              p.vx = 0;
+              p.vy = 0;
+              p.landed = true;
+            } else {
+              p.vx = p.vx * 0.7 + dx * 0.15;
+              p.vy = p.vy * 0.7 + dy * 0.15;
+              p.y += p.vy;
+              p.x += p.vx;
+            }
+          } else {
+            p.vy += 0.08;
+            p.vx = Math.max(-6, Math.min(6, p.vx));
+            p.vy = Math.max(-6, Math.min(8, p.vy));
+            p.y += p.vy;
+            p.x += p.vx;
+            p.vx *= 0.88;
+            p.vy *= 0.92;
+            p.rotation += p.rotVel;
+            p.rotVel *= 0.97;
+
+            if (p.y > FLOOR) {
+              p.y = FLOOR;
+              p.vy *= -0.25;
+              p.vx *= 0.7;
+              p.landed = true;
+            }
+            if (p.x < 20) { p.x = 20; p.vx = Math.abs(p.vx) * 0.5; }
+            if (p.x > window.innerWidth - 20) {
+              p.x = window.innerWidth - 20;
+              p.vx = -Math.abs(p.vx) * 0.5;
             }
           }
-
-          p.vy = Math.min(p.vy + 0.22, 14);
-          p.y += p.vy;
-          p.x += p.vx;
-          p.vx *= 0.99;
-          p.rotation += p.rotVel;
-          p.rotVel *= 0.97;
-
-          if (p.y >= FLOOR) {
-            p.y = FLOOR;
-            p.vy *= -0.22;
-            p.vx *= 0.75;
-            if (Math.abs(p.vy) < 0.8) { p.vy = 0; p.landed = true; }
-          }
-          if (p.x < 5)                      { p.x = 5;                      p.vx =  Math.abs(p.vx) * 0.5; }
-          if (p.x > window.innerWidth - 45) { p.x = window.innerWidth - 45; p.vx = -Math.abs(p.vx) * 0.5; }
         }
 
         const el = letterEls.current[i];
@@ -527,7 +566,7 @@ export function FallingLetters({ quote, language, onComplete, onClose }: Falling
             letterSpacing: 1,
           }}
         >
-          👏 clap or click to assemble ✦
+          👏👏 clap twice or click to assemble ✦
         </button>
       )}
 
