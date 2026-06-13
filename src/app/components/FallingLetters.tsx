@@ -490,13 +490,14 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
 
   const resolvedLang = resolveLanguage(language);
   const langOpt = LANGUAGE_OPTIONS.find(l => l.id === resolvedLang);
+  const progress = totalNonSpace > 0 ? spawnedCount / totalNonSpace : 0;
 
   return createPortal(
     <div
       style={{
         position: "fixed",
         inset: 0,
-        background: "#000000",
+        background: "transparent",
         zIndex: 9500,
         overflow: "hidden",
       }}
@@ -508,7 +509,29 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
         }
       `}</style>
 
-      {/* Video layer — visible as base, thermal canvas overlays it */}
+      {/* Black base — fades out as letters appear */}
+      <div style={{
+        position: "fixed",
+        inset: 0,
+        background: "#000",
+        opacity: Math.max(0, 1 - progress),
+        zIndex: 8984,
+        pointerEvents: "none",
+        transition: "opacity 0.8s ease",
+      }} />
+
+      {/* Desktop wallpaper — fades in as letters appear */}
+      <div style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 8985,
+        background: "url('/assets/windows.jpg') center/cover no-repeat",
+        opacity: progress,
+        transition: "opacity 0.8s ease",
+        pointerEvents: "none",
+      }} />
+
+      {/* Video layer — fades out as background fades in */}
       <video
         ref={videoRef}
         autoPlay muted playsInline
@@ -520,13 +543,15 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
           objectFit: "cover",
           transform: "scaleX(-1)",
           zIndex: 8988,
-          opacity: 1,
+          opacity: Math.max(0, 1 - progress * 1.2),
           display: "block",
+          transition: "opacity 0.8s ease",
         }}
       />
 
       <canvas ref={motionCanvasRef} style={{ display: "none" }} />
 
+      {/* Thermal canvas — fades out with camera */}
       <canvas
         ref={scanCanvasRef}
         style={{
@@ -536,6 +561,8 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
           height: "100vh",
           zIndex: 8990,
           pointerEvents: "none",
+          opacity: Math.max(0, 1 - progress * 1.2),
+          transition: "opacity 0.8s ease",
         }}
       />
 
@@ -620,7 +647,7 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
           letterSpacing: 1,
         }}>
           {spawnedCount === 0
-            ? "🧂 just move — letters will fall"
+            ? "put on your favorite music, move, and let the letters fall ✦"
             : `${totalNonSpace - spawnedCount} more...`
           }
         </div>
@@ -641,8 +668,8 @@ export function FallingLetters({ quote, language, mood, onComplete, onClose }: F
           zIndex: 8997,
           lineHeight: 1.6,
         }}>
-          🧂 just move<br />
-          <span style={{ fontSize: 14 }}>letters will fall from your fingers</span>
+          put on your favorite music, move,<br />
+          <span style={{ fontSize: 14 }}>and let the letters fall ✦</span>
         </div>
       )}
 
